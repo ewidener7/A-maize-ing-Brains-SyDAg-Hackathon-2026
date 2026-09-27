@@ -1,0 +1,601 @@
+---
+title: "XGBoost_Variable_Selection"
+author: "Chris Barron"
+date: "2026-09-26"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+library(xgboost)
+library(dplyr)
+library(ggplot2)
+library(Matrix)
+library(caret)
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## XGBoost to Determine if Raw or Proportion Genetic Data is Better
+
+Predictions are only run on BLUPs in a single year
+
+```{r}
+# Build Dataset
+
+## Load YLD_BLUP
+
+yld_blup <- read.csv("Phenotype_Files/YLD_BE_BLUP_clean.csv") |> select(LINE_UNIQUE_ID,YLD_BE_BLUP,YEAR)
+
+## Load Genotypes
+
+norm_geno <- read.csv("Genotype_Files/imputed_geno.csv") |> select(!c("X"))
+prop_geno <- read.csv("Genotype_Files/proportion_imputed_geno.csv") |> select(!c("X"))
+
+## Combine
+
+norm_df <- inner_join(yld_blup, norm_geno, by = "LINE_UNIQUE_ID")
+
+#Lose about 50K observations when joining with genotype
+
+# Separate features and target and set training and test datasets
+
+traindf <- norm_df |> filter(YEAR < 2007)
+validdf <- norm_df |> filter(YEAR == 2007)
+testdf <- norm_df |> filter(YEAR == 2008)
+
+
+
+train_labels <- traindf$YLD_BE_BLUP
+train_features <- traindf %>% select(!c(YLD_BE_BLUP,LINE_UNIQUE_ID))
+
+# One-hot encode categorical variables and convert to sparse matrix
+# The "-1" removes the intercept column, which XGBoost does not need
+train_sparse_matrix <- sparse.model.matrix(~ . - 1, data = train_features)
+
+# Create the XGBoost DMatrix
+dtrain <- xgb.DMatrix(data = train_sparse_matrix, label = train_labels)
+
+#Same for Valid
+valid_labels <- validdf$YLD_BE_BLUP
+valid_features <- validdf %>% select(!c(YLD_BE_BLUP,LINE_UNIQUE_ID))
+
+valid_sparse_matrix <- sparse.model.matrix(~ . - 1, data = valid_features)
+
+dvalid <- xgb.DMatrix(data = valid_sparse_matrix, label = valid_labels)
+
+#Same for Test
+test_labels <- testdf$YLD_BE_BLUP
+test_features <- testdf %>% select(!c(YLD_BE_BLUP,LINE_UNIQUE_ID))
+
+test_sparse_matrix <- sparse.model.matrix(~ . - 1, data = test_features)
+
+dtest <- xgb.DMatrix(data = test_sparse_matrix, label = test_labels)
+
+# Define hyperparameter grid
+xgb_params <- list(
+  booster = "gbtree",
+  objective = "reg:squarederror", # Use binary:logistic for classification
+# Computational scaling for 500k x 1.7k
+  tree_method      = "hist",        # Crucial for scaling runtime and memory
+  max_bin          = 256,           # Discrete binning for continuous/discrete data
+  
+  # Tree structure & complexity
+  max_depth        = 5,             # Prevents combinatorial explosion across 1,700 markers
+  min_child_weight = 50,            # Avoids splitting on rare alleles/outliers in 500k rows
+  
+  # Subsampling
+  subsample        = 0.8,           # Row subsampling for speed and variance reduction
+  colsample_bytree = 0.15,          # Selects ~250 markers/variables per tree
+  
+  # Regularization for collinear markers & growth stages
+  lambda           = 10,            # L2 penalty to handle LD and autocorrelated stages
+  alpha            = 1,             # L1 penalty to zero out uninformative markers
+  
+  # Optimization
+  eta              = 0.05           # Slower learning rate paired with early stopping
+)
+
+# Train the model using cross-validation to find the optimal number of rounds (trees)
+set.seed(42)
+cv_model <- xgb.cv(
+  params = xgb_params,
+  data = dtrain,
+  nrounds = 1000,
+  nfold = 5,
+  showsd = TRUE,
+  stratified = FALSE,
+  print_every_n = 50,
+  early_stopping_rounds = 15,
+  maximize = FALSE
+)
+
+# Train final model with the optimal number of trees found in CV
+best_nrounds <- which.min(cv_model$evaluation_log$test_rmse_mean)
+
+# Model continued to improve even at 1000 rounds of training. Training will be capped at 1000 to reduce computational cost, but marginial increases past 700
+
+watchlist <- list(train = dtrain, holdout_valid = dvalid)
+
+model_1 <- xgb.train(
+  params = xgb_params,
+  data = dtrain,
+  nrounds = 700,
+  watchlist = watchlist,
+  early_stopping_rounds = 15,
+  print_every_n = 50
+)
+
+
+#Normal Genotype prediction and accuracy
+
+preds <- predict(model_1, dtest)
+rmse <- sqrt(mean((test_labels - preds)^2))
+
+#rmse = 18.3153
+
+
+
+
+### Repeat with Frequency Geno ####
+
+norm_df <- inner_join(yld_blup, prop_geno, by = "LINE_UNIQUE_ID")
+
+#Lose about 50K observations when joining with genotype
+
+# Separate features and target and set training and test datasets
+
+traindf <- norm_df |> filter(YEAR < 2007)
+validdf <- norm_df |> filter(YEAR == 2007)
+testdf <- norm_df |> filter(YEAR == 2008)
+
+
+
+train_labels <- traindf$YLD_BE_BLUP
+train_features <- traindf %>% select(!c(YLD_BE_BLUP,LINE_UNIQUE_ID))
+
+# One-hot encode categorical variables and convert to sparse matrix
+# The "-1" removes the intercept column, which XGBoost does not need
+train_sparse_matrix <- sparse.model.matrix(~ . - 1, data = train_features)
+
+# Create the XGBoost DMatrix
+dtrain <- xgb.DMatrix(data = train_sparse_matrix, label = train_labels)
+
+#Same for Valid
+valid_labels <- validdf$YLD_BE_BLUP
+valid_features <- validdf %>% select(!c(YLD_BE_BLUP,LINE_UNIQUE_ID))
+
+valid_sparse_matrix <- sparse.model.matrix(~ . - 1, data = valid_features)
+
+dvalid <- xgb.DMatrix(data = valid_sparse_matrix, label = valid_labels)
+
+#Same for Test
+test_labels <- testdf$YLD_BE_BLUP
+test_features <- testdf %>% select(!c(YLD_BE_BLUP,LINE_UNIQUE_ID))
+
+test_sparse_matrix <- sparse.model.matrix(~ . - 1, data = test_features)
+
+dtest <- xgb.DMatrix(data = test_sparse_matrix, label = test_labels)
+
+
+# Model continued to improve even at 1000 rounds of training. Training will be capped at 1000 to reduce computational cost, but marginial increases past 700
+
+watchlist <- list(train = dtrain, holdout_valid = dvalid)
+
+model_1 <- xgb.train(
+  params = xgb_params,
+  data = dtrain,
+  nrounds = 700,
+  watchlist = watchlist,
+  early_stopping_rounds = 15,
+  print_every_n = 50
+)
+
+
+#Normal Genotype prediction and accuracy
+
+preds <- predict(model_1, dtest)
+rmse <- sqrt(mean((test_labels - preds)^2))
+
+#rmse = 18.4436
+
+
+```
+
+
+```{r}
+
+# Build Dataset
+
+## Load YLD_BLUP
+
+yld_df <- read.csv("Phenotype_Files/YLD_BE.csv") |> select(LINE_UNIQUE_ID,YLD_BE,YEAR,LOC) |> mutate(LOC_YEAR = paste0(LOC,"_",YEAR))
+
+## Load Genotypes
+
+prop_geno <- read.csv("Genotype_Files/proportion_imputed_geno.csv") |> select(!c("X"))
+
+## Load Env_Data
+
+weather <- read.csv("Weather_Data/4GS_Binned_Weather_Data_Mean.csv") |> select(!c("FAMILY","X","LINE","ERM"))
+
+## Combine
+
+norm_df <- inner_join(yld_df, prop_geno, by = "LINE_UNIQUE_ID") |> filter(YEAR %in% c(2002,2003,2004,2005))
+
+norm_df <- inner_join(norm_df, weather, by = join_by("LINE_UNIQUE_ID",
+                                                  "YEAR","LOC","LOC_YEAR"))
+
+#Lose about 50K observations when joining with genotype
+
+# Separate features and target and set training and test datasets
+
+traindf <- norm_df |> filter(YEAR != 2005)
+validdf <- norm_df |> filter(YEAR == 2005)
+
+
+train_labels <- traindf$YLD_BE
+train_features <- traindf %>% select(!c("YLD_BE","LINE_UNIQUE_ID","YEAR","LOC","LOC_YEAR"))
+
+# One-hot encode categorical variables and convert to sparse matrix
+# The "-1" removes the intercept column, which XGBoost does not need
+train_sparse_matrix <- sparse.model.matrix(~ . - 1, data = train_features)
+
+# Create the XGBoost DMatrix
+dtrain <- xgb.DMatrix(data = train_sparse_matrix, label = train_labels)
+
+#Same for Valid
+valid_labels <- validdf$YLD_BE_BLUP
+valid_features <- validdf %>% select(!c(YLD_BE_BLUP,LINE_UNIQUE_ID))
+
+valid_sparse_matrix <- sparse.model.matrix(~ . - 1, data = valid_features)
+
+dvalid <- xgb.DMatrix(data = valid_sparse_matrix, label = valid_labels)
+
+#Same for Test
+test_labels <- testdf$YLD_BE_BLUP
+test_features <- testdf %>% select(!c(YLD_BE_BLUP,LINE_UNIQUE_ID))
+
+test_sparse_matrix <- sparse.model.matrix(~ . - 1, data = test_features)
+
+dtest <- xgb.DMatrix(data = test_sparse_matrix, label = test_labels)
+
+# Define hyperparameter grid
+xgb_params <- list(
+  booster = "gbtree",
+  objective = "reg:squarederror", # Use binary:logistic for classification
+# Computational scaling for 500k x 1.7k
+  tree_method      = "hist",        # Crucial for scaling runtime and memory
+  max_bin          = 256,           # Discrete binning for continuous/discrete data
+  
+  # Tree structure & complexity
+  max_depth        = 5,             # Prevents combinatorial explosion across 1,700 markers
+  min_child_weight = 50,            # Avoids splitting on rare alleles/outliers in 500k rows
+  
+  # Subsampling
+  subsample        = 0.8,           # Row subsampling for speed and variance reduction
+  colsample_bytree = 0.15,          # Selects ~250 markers/variables per tree
+  
+  # Regularization for collinear markers & growth stages
+  lambda           = 10,            # L2 penalty to handle LD and autocorrelated stages
+  alpha            = 1,             # L1 penalty to zero out uninformative markers
+  
+  # Optimization
+  eta              = 0.05           # Slower learning rate paired with early stopping
+)
+
+# Train the model using cross-validation to find the optimal number of rounds (trees)
+set.seed(42)
+cv_model <- xgb.cv(
+  params = xgb_params,
+  data = dtrain,
+  nrounds = 1000,
+  nfold = 5,
+  showsd = TRUE,
+  stratified = FALSE,
+  print_every_n = 50,
+  early_stopping_rounds = 15,
+  maximize = FALSE
+)
+
+# Train final model with the optimal number of trees found in CV
+best_nrounds <- which.min(cv_model$evaluation_log$test_rmse_mean)
+
+# Model continued to improve even at 1000 rounds of training. Training will be capped at 1000 to reduce computational cost, but marginial increases past 700
+
+watchlist <- list(train = dtrain, holdout_valid = dvalid)
+
+model_1 <- xgb.train(
+  params = xgb_params,
+  data = dtrain,
+  nrounds = 700,
+  watchlist = watchlist,
+  early_stopping_rounds = 15,
+  print_every_n = 50
+)
+
+
+
+
+
+# Extract importance matrix
+importance_matrix <- xgb.importance(feature_names = colnames(sparse_matrix), model = final_xgb)
+
+# Print top 10 most important features
+head(importance_matrix, 10)
+
+# Plot top 15 features by Gain
+xgb.plot.importance(importance_matrix, top_n = 15, measure = "Gain", main = "Top 15 Features by Gain")
+
+
+# Set a threshold: retain features that account for the top 90% of cumulative Gain
+threshold <- 0.90
+
+# Calculate cumulative gain and filter
+importance_matrix <- importance_matrix %>%
+  mutate(Cumulative_Gain = cumsum(Gain))
+
+# Select variables
+selected_features_df <- importance_matrix %>%
+  filter(Cumulative_Gain <= threshold | lag(Cumulative_Gain, default = 0) <= threshold)
+
+selected_feature_names <- selected_features_df$Feature
+
+cat("Number of features selected:", length(selected_feature_names), "\n")
+print("Selected Features:")
+print(selected_feature_names)
+
+# Subset the original sparse matrix to only include the important features
+subset_sparse_matrix <- sparse_matrix[, selected_feature_names, drop = FALSE]
+
+# You can now create a new DMatrix for downstream training with only the subset
+dtrain_subset <- xgb.DMatrix(data = subset_sparse_matrix, label = labels)
+```
+
+
+### XGB BLUP Loop
+
+```{r}
+genodir <- "~/SyDAg_Hackathon/Genotype_Files/proportion_imputed_geno.csv"
+phenodir <- "~/SyDAg_Hackathon/Phenotype_Files"
+traitlist <- c("YLD_BE_BLUP","PHT_BLUP","TWT_BLUP")
+testyearlist <- c(2000,2001,2002,2003,2004,2005,2006,2007,2008)
+validyearlist <- c(2008,2000,2001,2002,2003,2004,2005,2006,2007)
+
+prop_geno <- read.csv("Genotype_Files/proportion_imputed_geno.csv") |> select(!c("X"))
+
+# Build Dataset
+
+## Load YLD_BLUP
+
+for(t in 1:3){
+  
+  for(y in 1:9){
+
+TRAIT_NAME <- traitlist[t]
+
+pheno_df <- read.csv(phenodir) |> select("LINE_UNIQUE_ID",TRAIT_NAME,"YEAR")
+
+## Combine
+
+norm_df <- inner_join(phenodf, prop_geno, by = "LINE_UNIQUE_ID")
+
+
+# Separate features and target and set training and test datasets
+
+testyr <- testyearlist[y]
+validyr <- validyearlist[y]
+
+traindf <- norm_df |> filter(YEAR != c(testyr,validyr))
+validdf <- norm_df |> filter(YEAR == validyr)
+testdf <- norm_df |> filter(YEAR == testyr)
+
+
+
+train_labels <- traindf[[TRAIT_NAME]]
+train_features <- traindf %>% select(!c(TRAIT_NAME,"LINE_UNIQUE_ID"))
+
+# One-hot encode categorical variables and convert to sparse matrix
+# The "-1" removes the intercept column, which XGBoost does not need
+train_sparse_matrix <- sparse.model.matrix(~ . - 1, data = train_features)
+
+# Create the XGBoost DMatrix
+dtrain <- xgb.DMatrix(data = train_sparse_matrix, label = train_labels)
+
+#Same for Valid
+valid_labels <- validdf[[TRAIT_NAME]]
+valid_features <- validdf %>% select(!c(TRAIT_NAME,"LINE_UNIQUE_ID"))
+
+valid_sparse_matrix <- sparse.model.matrix(~ . - 1, data = valid_features)
+
+dvalid <- xgb.DMatrix(data = valid_sparse_matrix, label = valid_labels)
+
+#Same for Test
+test_labels <- testdf[[TRAIT_NAME]]
+test_features <- testdf %>% select(!c(TRAIT_NAME,"LINE_UNIQUE_ID"))
+
+test_sparse_matrix <- sparse.model.matrix(~ . - 1, data = test_features)
+
+dtest <- xgb.DMatrix(data = test_sparse_matrix, label = test_labels)
+
+# Define hyperparameter grid
+xgb_params <- list(
+  booster = "gbtree",
+  objective = "reg:squarederror", # Use binary:logistic for classification
+# Computational scaling for 500k x 1.7k
+  tree_method      = "hist",        # Crucial for scaling runtime and memory
+  max_bin          = 256,           # Discrete binning for continuous/discrete data
+  
+  # Tree structure & complexity
+  max_depth        = 5,             # Prevents combinatorial explosion across 1,700 markers
+  min_child_weight = 50,            # Avoids splitting on rare alleles/outliers in 500k rows
+  
+  # Subsampling
+  subsample        = 0.8,           # Row subsampling for speed and variance reduction
+  colsample_bytree = 0.15,          # Selects ~250 markers/variables per tree
+  
+  # Regularization for collinear markers & growth stages
+  lambda           = 10,            # L2 penalty to handle LD and autocorrelated stages
+  alpha            = 1,             # L1 penalty to zero out uninformative markers
+  
+  # Optimization
+  eta              = 0.05           # Slower learning rate paired with early stopping
+)
+
+
+# Model continued to improve even at 1000 rounds of training. Training will be capped at 1000 to reduce computational cost, but marginial increases past 700
+
+watchlist <- list(train = dtrain, holdout_valid = dvalid)
+
+model_1 <- xgb.train(
+  params = xgb_params,
+  data = dtrain,
+  nrounds = 700,
+  watchlist = watchlist,
+  early_stopping_rounds = 15,
+  print_every_n = 50
+)
+
+
+#Normal Genotype prediction and accuracy
+
+preds <- predict(model_1, dtest)
+
+resultsdf <- testdf %>% select("LINE_UNIQUE_ID",TRAIT_NAME)
+
+resultsdf$Prediction <- as.numeric(preds)
+
+
+# Save output
+write.csv(resultsdf, here("XGB_BLUP_Pred",paste0(CV_Year,"_",TRAIT_NAME,".csv")), row.names = FALSE)
+
+}}
+
+```
+
+
+
+### XGB Env Loop
+
+```{r}
+genodir <- "~/SyDAg_Hackathon/Genotype_Files/proportion_imputed_geno.csv"
+phenodir <- "~/SyDAg_Hackathon/Phenotype_Files"
+traitlist <- c("YLD_BE","PHT","TWT")
+testyearlist <- c(2000,2001,2002,2003,2004,2005,2006,2007,2008)
+validyearlist <- c(2008,2000,2001,2002,2003,2004,2005,2006,2007)
+
+prop_geno <- read.csv("Genotype_Files/proportion_imputed_geno.csv") |> select(!c("X"))
+
+# Build Dataset
+
+## Load YLD_BLUP
+
+for(t in 1:3){
+  
+  for(y in 1:9){
+
+TRAIT_NAME <- traitlist[t]
+
+pheno_df <- read.csv(phenodir) |> select("LINE_UNIQUE_ID",TRAIT_NAME,"YEAR","LOC") |> mutate(LOC_YEAR = paste0(LOC,"_",YEAR))
+
+## Load Env_Data
+
+weather <- read.csv("Weather_Data/4GS_Binned_Weather_Data_Mean.csv") |> select(!c("FAMILY","X","LINE","ERM"))
+
+## Combine
+
+norm_df <- inner_join(yld_df, prop_geno, by = "LINE_UNIQUE_ID")
+
+norm_df <- inner_join(norm_df, weather, by = join_by("LINE_UNIQUE_ID",
+                                                  "YEAR","LOC","LOC_YEAR"))
+
+# Separate features and target and set training and test datasets
+
+testyr <- testyearlist[y]
+validyr <- validyearlist[y]
+
+traindf <- norm_df |> filter(YEAR != c(testyr,validyr))
+validdf <- norm_df |> filter(YEAR == validyr)
+testdf <- norm_df |> filter(YEAR == testyr)
+
+
+
+train_labels <- traindf[[TRAIT_NAME]]
+train_features <- traindf %>% select(!c(TRAIT_NAME,"LINE_UNIQUE_ID"))
+
+# One-hot encode categorical variables and convert to sparse matrix
+# The "-1" removes the intercept column, which XGBoost does not need
+train_sparse_matrix <- sparse.model.matrix(~ . - 1, data = train_features)
+
+# Create the XGBoost DMatrix
+dtrain <- xgb.DMatrix(data = train_sparse_matrix, label = train_labels)
+
+#Same for Valid
+valid_labels <- validdf[[TRAIT_NAME]]
+valid_features <- validdf %>% select(!c(TRAIT_NAME,"LINE_UNIQUE_ID"))
+
+valid_sparse_matrix <- sparse.model.matrix(~ . - 1, data = valid_features)
+
+dvalid <- xgb.DMatrix(data = valid_sparse_matrix, label = valid_labels)
+
+#Same for Test
+test_labels <- testdf[[TRAIT_NAME]]
+test_features <- testdf %>% select(!c(TRAIT_NAME,"LINE_UNIQUE_ID"))
+
+test_sparse_matrix <- sparse.model.matrix(~ . - 1, data = test_features)
+
+dtest <- xgb.DMatrix(data = test_sparse_matrix, label = test_labels)
+
+# Define hyperparameter grid
+xgb_params <- list(
+  booster = "gbtree",
+  objective = "reg:squarederror", # Use binary:logistic for classification
+# Computational scaling for 500k x 1.7k
+  tree_method      = "hist",        # Crucial for scaling runtime and memory
+  max_bin          = 256,           # Discrete binning for continuous/discrete data
+  
+  # Tree structure & complexity
+  max_depth        = 5,             # Prevents combinatorial explosion across 1,700 markers
+  min_child_weight = 50,            # Avoids splitting on rare alleles/outliers in 500k rows
+  
+  # Subsampling
+  subsample        = 0.8,           # Row subsampling for speed and variance reduction
+  colsample_bytree = 0.15,          # Selects ~250 markers/variables per tree
+  
+  # Regularization for collinear markers & growth stages
+  lambda           = 10,            # L2 penalty to handle LD and autocorrelated stages
+  alpha            = 1,             # L1 penalty to zero out uninformative markers
+  
+  # Optimization
+  eta              = 0.05           # Slower learning rate paired with early stopping
+)
+
+
+# Model continued to improve even at 1000 rounds of training. Training will be capped at 1000 to reduce computational cost, but marginial increases past 700
+
+watchlist <- list(train = dtrain, holdout_valid = dvalid)
+
+model_1 <- xgb.train(
+  params = xgb_params,
+  data = dtrain,
+  nrounds = 700,
+  watchlist = watchlist,
+  early_stopping_rounds = 15,
+  print_every_n = 50
+)
+
+
+#Normal Genotype prediction and accuracy
+
+preds <- predict(model_1, dtest)
+
+resultsdf <- testdf %>% select("LINE_UNIQUE_ID",TRAIT_NAME)
+
+resultsdf$Prediction <- as.numeric(preds)
+
+
+# Save output
+write.csv(resultsdf, here("XGB_BLUP_Pred",paste0(CV_Year,"_",TRAIT_NAME,".csv")), row.names = FALSE)
+
+}}
+
+```
+

@@ -1,0 +1,686 @@
+---
+title: "Bayer Yield Stability Environment Paramaterization"
+author: "Chris Barron"
+date: "2025-07-24"
+output:
+  pdf_document: default
+  html_document: default
+---
+
+```{r setup, include=FALSE}
+library(here)
+library(dplyr)
+library(tidyverse)
+library(ggfortify)
+library(ggplot2)
+library(readxl)
+library(openxlsx)
+library(ggpubr)
+library(rstatix)
+library(lme4)
+library(lmerTest)
+library(car)
+
+knitr::opts_chunk$set(echo = TRUE)
+
+datadir <- "Data/Bayer_Yield_Rsheet.csv"
+weatherdir <- "Data/Bayer_Weather_Rsheet.csv"
+
+read_excel_allsheets <- function(filename, tibble = FALSE) {
+    sheets <- readxl::excel_sheets(filename)
+    x <- lapply(sheets, function(X) readxl::read_excel(filename, sheet = X))
+    if(!tibble) x <- lapply(x, as.data.frame)
+    names(x) <- sheets
+    x
+}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Data Correction
+
+YLD - uncorrected yield
+YLD_BE - Spatially adjusted grain yield
+
+Data file also includes population and moisture, so it might be good to correct yield based on these too
+
+Plant height and ear height traits are also available
+
+
+### Experiments/Tasks
+
+1) Parameterize Environments - Convert times-scale data into binned data based on GDD (assuming RM of 120) and also include static environmental variables.
+  a. Determine if any of these variables are signficantly correlated to yield or if anova of environmental effects and yield has signficant explanations of vairance
+  b. Assign environments as stressed.excess, stressed.lack, and optimum. I can play around with the specifics of these, perhaps with a scale of -3 to 3 where 0 is optimum, -3 is worst lack, and 3 is worst excess
+  c. Develop an environment relationship/covariance matrix
+
+2) After classifying environments as optimal or stressed, perform same regressions as for ACRE and GOTH where the trt effect is not explained by year. See if there is a singificant environment - year interaction
+
+3) Based on environment classification, see if there are differences in the yield stability of different hybrids across environments
+
+
+## Calcualte In Season and Cumulative GDD for each location - year
+
+```{r}
+# Load weather data
+weatherdf <- read.csv(weatherdir)
+
+# Load Yield Data, which inlcudes planting and harvest dates
+yielddf <- read.csv(datadir)
+
+# Extract Planting Dates
+plantingdf <- yielddf %>% select(locyear,planting_date) %>% unique() %>% mutate(plantday = as.numeric(str_extract(planting_date, "(?<=/)\\d+"))) %>% 
+  mutate(plantmonth = as.numeric(str_extract(planting_date, "\\d+(?=/)"))) %>% mutate(planting_date_numeric = plantmonth + 0.01*plantday)
+
+#Convert dates in weather data to numeric so they can be filtered
+weatherdf <- weatherdf %>% mutate(day = as.numeric(str_extract(date, "(?<=/)\\d+"))) %>% 
+  mutate(month = as.numeric(str_extract(date, "\\d+(?=/)"))) %>% mutate(date_numeric = month + 0.01*day) %>% 
+  mutate(locyear = paste0(loc_id, "_",planting_year))
+
+locyearlist <- weatherdf %>% pull(locyear) %>% unique()
+
+#Calculate cumulative GDD for each locyr within the growing season
+
+allGDD <- data.frame(matrix(ncol = 4, nrow=0))
+colnames(allGDD) <- c("locyear", "date_numeric", "inseasonGDD", "cumulativeinseasonGDD")
+
+for(l in 1:length(locyearlist)){
+  
+  locyr <- locyearlist[l]
+  
+  locdate <- plantingdf %>% filter(locyear == locyr) %>% pull(planting_date_numeric)
+  
+  if(length(locdate) != 1){
+    
+    next
+    
+  }
+  
+  locweatherdf <- weatherdf %>% filter(locyear == locyr) %>% filter(date_numeric >= locdate) %>%
+    mutate(GDD_airmax = if_else(max_temperature > 86, 86, max_temperature)) %>% mutate(inseasonGDD = (GDD_airmax + min_temperature)/2 - 50)
+  
+  locweatherdf <- locweatherdf %>% mutate(inseasonGDD = if_else(inseasonGDD < 0, 0, inseasonGDD)) %>% arrange(date_numeric)
+  
+  locweatherdf <- locweatherdf %>% mutate(cumulativeinseasonGDD = cumsum(inseasonGDD))
+  
+  GDDvalues <- locweatherdf %>% select(locyear, date_numeric, inseasonGDD, cumulativeinseasonGDD )
+  
+  allGDD <- rbind(allGDD, GDDvalues)
+  
+}
+
+#Two loc - years have missing weather data
+
+newweatherdf <- left_join(weatherdf, allGDD, by = join_by("locyear","date_numeric"))
+
+write.csv(newweatherdf, here("Data","Bayer_weather_inseasonGDD.csv"))
+
+```
+
+
+
+## Bin Weather by Growth Stage based on Relative Maturity of 110
+```{r}
+# Load weather data
+weatherdf <- read.csv(here("Data","Bayer_weather_inseasonGDD.csv"))
+
+# Load Yield Data, which inlcudes planting and harvest dates
+yielddf <- read.csv(datadir)
+
+
+ RM = 110
+
+GDDdf <- yielddf %>% select(locyear) %>% mutate(EmergeGDD = 115) %>% 
+  mutate(EarlyVeg1GDD = 1.5*RM+115) %>% 
+  mutate(EarlyVeg2GDD = 4*RM+115) %>% 
+  mutate(MidVegGDD = 8*RM+115) %>% 
+  mutate(LateVegGDD = 10*RM+115) %>% 
+  mutate(SilkGDD = 11.456*RM+100.57) %>% 
+  mutate(BlisterGDD = 14.4*RM+77.409) %>% 
+  mutate(DoughGDD = 16.8*RM+54.259) %>% 
+  mutate(DentGDD = 19.2*RM+31.109) %>% 
+  mutate(BLGDD = 24.158*RM-15.191)
+
+
+locyrlist <- GDDdf %>% unique()
+
+# Remove rows with NA values, these represent rows that have weather data before or after harvest
+weatherdf <- na.omit(weatherdf)
+
+weathercols <- colnames(weatherdf[,4:44])
+
+lablesvector <- c("Emergence","EarlyVeg1","EarlyVeg2","MidVeg","LateVeg","Silk","Blister","Dough",
+                    "Dent","BL")
+
+combinedbinnedweather <- data.frame(matrix(ncol = 442, nrow = 0))
+
+colnames(combinedbinnedweather) <- c(colnames(yielddf[,c(1:3,5,11,15,18,19,22:27,29:46)]),paste0(rep(weathercols,each=10),"_",rep(lablesvector,times=41)))
+
+for(i in 1:nrow(locyrlist)){
+  
+  singleyield <- locyrlist[i,]
+  
+  locyr <- singleyield %>% pull(locyear)
+  
+  cutvector <- t(singleyield[1,2:11]) %>% as.vector()
+  cutvector <- c(0,cutvector)
+
+  
+  redweatherdf <- weatherdf %>% filter(locyear == locyr) %>% 
+    mutate(cumulativeinseasonGDD = as.numeric(cumulativeinseasonGDD))
+ # Skip Entries where we do not have weather data for that loc year pair
+  if(nrow(redweatherdf) == 0){
+    
+    next
+  }
+  
+  redweatherdf <- redweatherdf %>% mutate(Maturity = cut(cumulativeinseasonGDD,
+                                                         breaks=cutvector,
+                                                         labels = lablesvector,
+                                                         include.lowest=T))
+  redweatherdf <- redweatherdf %>% group_by(Maturity) %>% summarize_at(all_of(weathercols),mean) %>% na.omit()
+  
+# Skip entries where not enough GDDs accumulated for all growth stages
+  if(nrow(redweatherdf) != 10){
+    
+    next
+    
+  }
+  
+  weathervars <- redweatherdf %>% pivot_wider(names_from = Maturity, values_from = -c(Maturity))
+  
+  
+  newentry <- cbind(singleyield,weathervars)
+  
+  combinedbinnedweather <- rbind(combinedbinnedweather,newentry)
+}
+
+
+entryandphenodf <- yielddf[,c(1:3,5,11,15,18,19,22:27,29:46)]
+
+fullweatherentrydf <- inner_join(entryandphenodf,combinedbinnedweather,by=join_by("locyear"))
+
+
+write.csv(fullweatherentrydf,here("Data","10GS_Binned_Weather_Data_Mean.csv"))
+
+```
+
+Old Weather file was binned based on 120 RM, new relative matrity file binned based on 110 RM
+
+
+
+```{r}
+weatherpcs <- prcomp(combinedbinnedweather[,c(12:81)])
+
+autoplot(weatherpcs,
+         data = combinedbinnedweather)
+```
+
+## Bin Weather by Growth Stage based on Relative Maturity of 110
+```{r}
+# Load weather data
+weatherdf <- read.csv(here("Data","Bayer_weather_inseasonGDD.csv"))
+
+# Load Yield Data, which inlcudes planting and harvest dates
+yielddf <- read.csv(datadir)
+
+
+ RM = 110
+
+GDDdf <- yielddf %>% select(locyear) %>% mutate(EmergeGDD = 115) %>% 
+  mutate(EarlyVeg1GDD = 1.5*RM+115) %>% 
+  mutate(EarlyVeg2GDD = 4*RM+115) %>% 
+  mutate(MidVegGDD = 8*RM+115) %>% 
+  mutate(LateVegGDD = 10*RM+115) %>% 
+  mutate(SilkGDD = 11.456*RM+100.57) %>% 
+  mutate(BlisterGDD = 14.4*RM+77.409) %>% 
+  mutate(DoughGDD = 16.8*RM+54.259) %>% 
+  mutate(DentGDD = 19.2*RM+31.109) %>% 
+  mutate(BLGDD = 24.158*RM-15.191)
+
+
+locyrlist <- GDDdf %>% unique()
+
+# Remove rows with NA values, these represent rows that have weather data before or after harvest
+weatherdf <- na.omit(weatherdf)
+
+weatherdf <- weatherdf %>% mutate(mean_temp = (max_temperature + min_temperature)/2) %>% 
+  select(mean_temp,total_precipitation.inch.of.water,locyear,cumulativeinseasonGDD)
+
+weathercols <- colnames(weatherdf[,1:2])
+
+lablesvector <- c("Emergence","EarlyVeg1","EarlyVeg2","MidVeg","LateVeg","Silk","Blister","Dough",
+                    "Dent","BL")
+
+combinedbinnedweather <- data.frame(matrix(ncol = 31, nrow = 0))
+
+colnames(combinedbinnedweather) <- c(colnames(yielddf[,c(1:3,5,11,22:27)]),paste0(rep(weathercols,each=10),"_",rep(lablesvector,times=2)))
+
+for(i in 1:nrow(locyrlist)){
+  
+  singleyield <- locyrlist[i,]
+  
+  locyr <- singleyield %>% pull(locyear)
+  
+  cutvector <- t(singleyield[1,2:11]) %>% as.vector()
+  cutvector <- c(0,cutvector)
+
+  
+  redweatherdf <- weatherdf %>% filter(locyear == locyr) %>% 
+    mutate(cumulativeinseasonGDD = as.numeric(cumulativeinseasonGDD))
+ # Skip Entries where we do not have weather data for that loc year pair
+  if(nrow(redweatherdf) == 0){
+    
+    next
+  }
+  
+  redweatherdf <- redweatherdf %>% mutate(Maturity = cut(cumulativeinseasonGDD,
+                                                         breaks=cutvector,
+                                                         labels = lablesvector,
+                                                         include.lowest=T))
+  redweatherdf <- redweatherdf %>% group_by(Maturity) %>% summarize_at(all_of(weathercols),mean) %>% na.omit()
+  
+# Skip entries where not enough GDDs accumulated for all growth stages
+  if(nrow(redweatherdf) != 10){
+    
+    next
+    
+  }
+  
+  redweatherdf <- redweatherdf %>% mutate(deficit_temp = if_else(mean_temp <73.4,1,0)) %>% mutate(excess_temp = if_else(mean_temp>89.6,1,0)) %>% 
+    mutate(deficit_precip = if_else(total_precipitation.inch.of.water<0.39,1,0)) %>%
+    mutate(excess_precip = if_else(total_precipitation.inch.of.water > 0.78,1,0))
+  
+  weathervars <- redweatherdf %>% pivot_wider(names_from = Maturity, values_from = -c(Maturity))
+  
+  newentry <- cbind(singleyield,weathervars)
+  
+  combinedbinnedweather <- rbind(combinedbinnedweather,newentry)
+}
+
+combinedbinnedweather <- combinedbinnedweather %>% rowwise() %>%  mutate(total_excess = sum(c_across(starts_with("excess_")))) %>% 
+  mutate(total_deficit = sum(c_across(starts_with("deficit_"))))
+
+range(pull(combinedbinnedweather,total_deficit))
+
+entryandphenodf <- yielddf[,c(1:3,5,11,22:27)]
+
+fullweatherentrydf <- inner_join(entryandphenodf,combinedbinnedweather,by=join_by("locyear"))
+```
+
+# Comparison of Stress Covariates and Mean Yield
+
+```{r}
+yielddf <- read.csv(datadir)
+
+genoyrvalues <- read_excel_allsheets(here("Data","Bayer2021ACRERsheet.xlsx"))
+genoyrvalues <- genoyrvalues[[3]]
+genoyrvalues <- genoyrvalues %>% select(Genotype,Year) %>% mutate(Year = Year - 1982) %>% unique()
+
+yielddf <-  left_join(yielddf,genoyrvalues,by = "Genotype")
+
+# Remove outliers
+
+dfouts <- yielddf %>% mutate_if(is.numeric,scale) %>% mutate(across(is.numeric,~ifelse(abs(.)>4,NA,1)))
+
+yielddf[22:27] <- yielddf[22:27]*dfouts[22:27]
+
+
+locsumdf <- yielddf %>% select(locyear,YLD) %>% group_by(locyear) %>% summarize(MeanYLD = mean(YLD, na.rm=TRUE)) %>% ungroup()
+
+stressdf <- fullweatherentrydf %>% select(locyear,total_deficit)
+
+locsumdf <- inner_join(stressdf,locsumdf,by="locyear")
+
+plot3 <- ggplot(locsumdf, aes(x=MeanYLDZ, y=total_deficit))+
+  ylab("Total Stress by Deficit")+
+  geom_point(size=2)
+print(plot3)
+```
+
+
+
+# ANalysis of within year-loc stdev of yield
+
+```{r}
+df <- fullweatherentrydf[,c(1:3,7,83)]
+
+genoyrvalues <- read_excel_allsheets(here("Data","Bayer2021ACRERsheet.xlsx"))
+genoyrvalues <- genoyrvalues[[3]]
+genoyrvalues <- genoyrvalues %>% select(Genotype,Year) %>% mutate(Year = Year - 1982) %>% unique()
+
+df <-  left_join(df,genoyrvalues,by = "Genotype")
+
+df <- df %>% mutate(Class = if_else(total_deficit < 13, "Optimal", if_else(total_deficit < 15, "Mid", "High")))
+
+temp <- df %>% count(Class)
+hist(df$total_deficit)
+
+df <- df %>% na.omit() %>% group_by(Genotype, Year, Class) %>% summarize(Yld_Sdtev = var(YLD_BE)) %>% na.omit() %>% ungroup()
+
+traits = colnames(df[,c(3:4)])
+
+for (t in 2){
+
+trait <- traits[t]
+
+cat("\n\n\\pagebreak\n") 
+  cat(paste(trait," With GS as Factor no SPATs"))
+  cat("\n")
+
+traitdf <- df %>%  select(c("Class","Genotype","Year",trait)) %>% na.omit() %>% rename("Trait" = trait) %>%
+  mutate(Year = as.numeric(Year)) %>% mutate(Class = as.factor(Class))
+
+#Visualize the Data
+
+bxp2 <- ggboxplot(traitdf, x="Class", y="Trait",color = "Class",lwd = 1)+
+  ylab(trait)
+print(bxp2)
+
+# Check Normality Assumption
+
+normmodel <- lm(Trait~Year+factor(Class)+Year*factor(Class),data = traitdf)
+normplot <-  ggqqplot(residuals(normmodel))+
+   ggtitle(paste0(trait," QQ Plot"))
+
+print(normplot)
+
+shapiropval <- shapiro.test(normmodel$residuals)
+shapiropval <- shapiropval$p.value %>% round(4)
+
+
+#Constant variance
+
+
+Homoscedasticity <- ncvTest(normmodel)
+Homoscedasticityp <- Homoscedasticity$p %>% round(4)
+
+#If p-value is not significant, variance is constant
+
+#Anova test for variety and replication
+
+anovatest <- anova_test(data = traitdf, Trait~Year+factor(Class)+Year*factor(Class))
+
+anovatest <- as.tibble(anovatest)
+
+# Determine if any of the effects are significant
+anovanames <- anovatest %>% pull(Effect)
+anovapvals <- anovatest %>% pull(p)
+
+#Fit regression across treatments
+modelall <- lm(Trait~ Year + factor(Class)+Year*factor(Class),traitdf)
+summaryall <- summary(modelall)
+
+predictions <- predict(modelall,traitdf)
+residdf <- data.frame("residuals" = summaryall$residuals, "predictions" = predictions, "year" = traitdf$Year)
+residplot <- ggplot(residdf, aes(x = predictions, y=residuals))+
+  geom_point()
+
+coefsall <- summaryall$coefficients
+
+CoefHigh <- sum(coefsall[c(2),1]) %>% round(4)
+CoefHighp <- if_else(min(coefsall[c(2),4]) <= 0.05, "*", "")
+
+CoefMid <- sum(coefsall[c(2,3,5),1]) %>% round(4)
+CoefMidp <- if_else(min(coefsall[c(2,3,5),4]) <= 0.05, "*", "")
+
+CoefOptim <- sum(coefsall[c(2,4,6),1]) %>% round(4)
+CoefOptimp <- if_else(min(coefsall[c(2,4,6),4]) <= 0.05, "*", "")
+
+#Plot comparing the two regresisons
+
+
+plot3 <- ggplot(traitdf, aes(x=Year, y=Trait,color=Class))+
+  ylab(trait)+
+  geom_point(size=2)+
+  scale_color_brewer(palette = "Dark2")+
+  geom_smooth(method="lm",se=FALSE,lwd=2)
+print(plot3)
+
+print(residplot)
+
+
+
+}
+
+
+
+#write.csv(spatsanalysisdf,here(datadir,"GOTH_No_Spats_Analysis.csv"))
+
+
+```
+
+# ANalysis of within year-loc stdev of yield with stdev scaled on yield magnitude
+
+```{r}
+df <- fullweatherentrydf[,c(1:3,7,83)]
+
+genoyrvalues <- read_excel_allsheets(here("Data","Bayer2021ACRERsheet.xlsx"))
+genoyrvalues <- genoyrvalues[[3]]
+genoyrvalues <- genoyrvalues %>% select(Genotype,Year) %>% mutate(Year = Year - 1982) %>% unique()
+
+df <-  left_join(df,genoyrvalues,by = "Genotype")
+
+df <- df %>% mutate(Class = if_else(total_deficit < 13, "Optimal", if_else(total_deficit < 15, "Mid", "High")))
+
+temp <- df %>% count(Class)
+hist(df$total_deficit)
+
+df <- df %>% na.omit() %>% group_by(Genotype, Year, Class) %>% summarize(Yld_Stdev = var(YLD_BE), Yld_Mean = mean(YLD_BE)) %>% 
+  na.omit() %>% ungroup() %>% mutate(Yld_varstd = Yld_Stdev/Yld_Mean)
+
+
+
+traits = colnames(df[,c(4:6)])
+
+for (t in 3){
+
+trait <- traits[t]
+
+cat("\n\n\\pagebreak\n") 
+  cat(paste(trait," With GS as Factor no SPATs"))
+  cat("\n")
+
+traitdf <- df %>%  select(c("Class","Genotype","Year",trait)) %>% na.omit() %>% rename("Trait" = trait) %>%
+  mutate(Year = as.numeric(Year)) %>% mutate(Class = as.factor(Class))
+
+#Visualize the Data
+
+bxp2 <- ggboxplot(traitdf, x="Class", y="Trait",color = "Class",lwd = 1)+
+  ylab(trait)
+print(bxp2)
+
+# Check Normality Assumption
+
+normmodel <- lm(Trait~Year+factor(Class)+Year*factor(Class),data = traitdf)
+normplot <-  ggqqplot(residuals(normmodel))+
+   ggtitle(paste0(trait," QQ Plot"))
+
+print(normplot)
+
+shapiropval <- shapiro.test(normmodel$residuals)
+shapiropval <- shapiropval$p.value %>% round(4)
+
+
+#Constant variance
+
+
+Homoscedasticity <- ncvTest(normmodel)
+Homoscedasticityp <- Homoscedasticity$p %>% round(4)
+
+#If p-value is not significant, variance is constant
+
+#Anova test for variety and replication
+
+anovatest <- anova_test(data = traitdf, Trait~Year+factor(Class)+Year*factor(Class))
+
+anovatest <- as.tibble(anovatest)
+
+# Determine if any of the effects are significant
+anovanames <- anovatest %>% pull(Effect)
+anovapvals <- anovatest %>% pull(p)
+
+#Fit regression across treatments
+modelall <- lm(Trait~ Year + factor(Class)+Year*factor(Class),traitdf)
+summaryall <- summary(modelall)
+
+predictions <- predict(modelall,traitdf)
+residdf <- data.frame("residuals" = summaryall$residuals, "predictions" = predictions, "year" = traitdf$Year)
+residplot <- ggplot(residdf, aes(x = predictions, y=residuals))+
+  geom_point()
+
+coefsall <- summaryall$coefficients
+
+CoefHigh <- sum(coefsall[c(2),1]) %>% round(4)
+CoefHighp <- if_else(min(coefsall[c(2),4]) <= 0.05, "*", "")
+
+CoefMid <- sum(coefsall[c(2,3,5),1]) %>% round(4)
+CoefMidp <- if_else(min(coefsall[c(2,3,5),4]) <= 0.05, "*", "")
+
+CoefOptim <- sum(coefsall[c(2,4,6),1]) %>% round(4)
+CoefOptimp <- if_else(min(coefsall[c(2,4,6),4]) <= 0.05, "*", "")
+
+#Plot comparing the two regresisons
+
+
+plot3 <- ggplot(traitdf, aes(x=Year, y=Trait,color=Class))+
+  ylab(trait)+
+  geom_point(size=2)+
+  scale_color_brewer(palette = "Dark2")+
+  geom_smooth(method="lm",se=FALSE,lwd=2)
+print(plot3)
+
+print(residplot)
+
+
+
+}
+
+#colnames(spatsanalysisdf) <- c("Statistic",traits)
+
+#write.csv(spatsanalysisdf,here(datadir,"GOTH_No_Spats_Analysis.csv"))
+
+
+```
+
+
+# ANalysis of Yield Data
+
+```{r}
+#write.csv(fullweatherentrydf,here("Data","10GS_Binned_Weather_Data.csv"))
+
+df <- fullweatherentrydf[,c(1:3,7,83)]
+
+genoyrvalues <- read_excel_allsheets(here("Data","Bayer2021ACRERsheet.xlsx"))
+genoyrvalues <- genoyrvalues[[3]]
+genoyrvalues <- genoyrvalues %>% select(Genotype,Year) %>% mutate(Year = Year - 1982) %>% unique()
+
+df <-  left_join(df,genoyrvalues,by = "Genotype")
+
+df <- df %>% mutate(Class = if_else(total_deficit < 14, "Optimal", if_else(total_deficit < 17, "Mid", "High")))
+
+
+traits = colnames(df[,c(4:5)])
+
+for (t in 1){
+
+trait <- traits[t]
+
+cat("\n\n\\pagebreak\n") 
+  cat(paste(trait," With GS as Factor no SPATs"))
+  cat("\n")
+
+traitdf <- df %>%  select(c("Class","Genotype","Year",trait)) %>% na.omit() %>% rename("Trait" = trait) %>%
+  mutate(Year = as.numeric(Year)) %>% mutate(Class = as.factor(Class))
+
+#Visualize the Data
+
+bxp2 <- ggboxplot(traitdf, x="Class", y="Trait",color = "Class",lwd = 1)+
+  ylab(trait)
+print(bxp2)
+
+# Check Normality Assumption
+
+normmodel <- lm(Trait~Year+factor(Class)+Year*factor(Class),data = traitdf)
+normplot <-  ggqqplot(residuals(normmodel))+
+   ggtitle(paste0(trait," QQ Plot"))
+
+print(normplot)
+
+shapiropval <- shapiro.test(normmodel$residuals)
+shapiropval <- shapiropval$p.value %>% round(4)
+
+
+#Constant variance
+
+
+Homoscedasticity <- ncvTest(normmodel)
+Homoscedasticityp <- Homoscedasticity$p %>% round(4)
+
+#If p-value is not significant, variance is constant
+
+#Anova test for variety and replication
+
+anovatest <- traitdf %>% anova_test(Trait~Year+factor(Class)+Year*factor(Class))
+
+anovatest <- as.tibble(anovatest)
+
+# Determine if any of the effects are significant
+anovanames <- anovatest %>% pull(Effect)
+anovapvals <- anovatest %>% pull(p)
+
+#Fit regression across treatments
+modelall <- lm(Trait~ Year + factor(Class)+Year*factor(Class),traitdf)
+summaryall <- summary(modelall)
+
+predictions <- predict(modelall,traitdf)
+residdf <- data.frame("residuals" = summaryall$residuals, "predictions" = predictions, "year" = traitdf$Year)
+residplot <- ggplot(residdf, aes(x = predictions, y=residuals))+
+  geom_point()
+
+coefsall <- summaryall$coefficients
+
+CoefHigh <- sum(coefsall[c(2),1]) %>% round(4)
+CoefHighp <- if_else(min(coefsall[c(2),4]) <= 0.05, "*", "")
+
+CoefMid <- sum(coefsall[c(2,3,5),1]) %>% round(4)
+CoefMidp <- if_else(min(coefsall[c(2,3,5),4]) <= 0.05, "*", "")
+
+CoefOptim <- sum(coefsall[c(2,4,6),1]) %>% round(4)
+CoefOptimp <- if_else(min(coefsall[c(2,4,6),4]) <= 0.05, "*", "")
+
+#Plot comparing the two regresisons
+
+
+plot3 <- ggplot(traitdf, aes(x=Year, y=Trait,color=Class))+
+  ylab(trait)+
+  geom_point(size=2)+
+  scale_color_brewer(palette = "Dark2")+
+  geom_smooth(method="lm",se=FALSE,lwd=2)
+print(plot3)
+
+print(residplot)
+
+
+table <- data.frame("Assumption Checking" = c("Homoscedasticity", "Shapiro-Wilk",rep("",times=2)),
+                    "p-values" = c(Homoscedasticityp,shapiropval,rep("",times=2)) ,
+                    "." = c(rep("",times=4)),
+                    "ANOVA Effects" = c(anovanames),
+                    "p-values" = c(anovapvals),
+                    ".." = c(rep("",times=4)),
+                    "Trt" = c("High","Mid","Optimal",""),
+                    "Slope" = c(CoefHigh,CoefMid,CoefOptim,""),
+                    "Sig" = c(CoefHighp,CoefMidp,CoefOptimp,""))
+
+
+print(knitr::kable(table, caption = paste0(trait, " Statistics")))
+
+spatsanalysisdf <- cbind(spatsanalysisdf,c(Homoscedasticityp,shapiropval,anovapvals,CoefTrt0,CoefTrt40,CoefTrt100))
+
+}
+
+colnames(spatsanalysisdf) <- c("Statistic",traits)
+
+#write.csv(spatsanalysisdf,here(datadir,"GOTH_No_Spats_Analysis.csv"))
+
+
+```

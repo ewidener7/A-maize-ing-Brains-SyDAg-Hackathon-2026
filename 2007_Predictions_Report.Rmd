@@ -1,0 +1,543 @@
+---
+title: "2007 Breeder Predictions Report"
+author: "A-maize-ing Brains"
+date: "2026-9-27"
+output:
+  pdf_document: default
+  html_document: default
+  word_document: default
+---
+
+```{r setup, include=FALSE}
+library(tidyverse)
+library(here)
+library(readxl)
+library(lme4)
+library(lmerTest)
+library(magrittr)
+library(stringr)
+library(caret)
+library(scales)
+library(ggpointdensity)
+library(GGally)
+library(patchwork)
+knitr::opts_chunk$set(dev = 'png', dpi = 150, echo = TRUE)
+```
+
+# Trait Accuracy Report
+
+This is a document that reports the overall accuracy of each model by presenting a heat map showing the quartile prediction accuracy. The models are trained on data from 2000-2006 and then tested on 2007 data. The train test split of predicting into a new year should give the most accurate representation of how our models will predict into a new year. In the heatmaps, the quartiles are listed from 1 to 4 with 4 being the lowest yielding genotypes and 1 being the highest yielding genotypes. Each square give the proportion of genotypes that fit into each quartile pair, with each column and row adding to 1. Additionally, accuracy statistics are split into 3 types:
+
+1. Global Accuracy: These are calculated by simply including all predictions and then calculating rank accuracy
+2. Genotypic Accuracy (G): These are calculated by averaging predictions across locations for each genotype and calculating rank accuracy
+3. Within Environment Accuracy (GxE): These are calculated by calculating the rank accuracy within each location and then creating a weighted average across all locations based on the number of entries within each
+
+
+
+```{r, echo=FALSE}
+# Define Directories
+datadir <- ""
+
+modellist = c("GBLUP","XGB_BLUP","XGB_Env")
+knitr::kable(modellist, caption = "Models")
+
+traitnamelist = c("YLD_BE", "TWT","PHT")
+bluplist <- c("_BLUP","_BLUP","")
+knitr::kable(traitnamelist, caption = "Trait Predicted")
+
+
+
+```
+
+
+# Accuracy Statistics
+
+## Yield
+
+```{r, echo=FALSE, results='asis', message=FALSE, warning=FALSE, out.width = "50%"}
+
+
+i=1
+t=1
+d=1
+
+ 
+for(w in 1:3){
+ 
+  trait = traitnamelist[w]
+
+  
+  
+  fulldf <- data.frame("Pedigree" = as.character())
+  statstable <- data.frame("STAT" = c("Bot25","25p50p","50p75p","Top25","bot25inbot50","Top25intop50","top10","top10in25","rmse","corr"))
+  
+  
+  ## Calculate Global Statistics First
+  
+  cat("\n\n\\pagebreak\n") 
+
+  cat(paste(trait,"_Global Accuracy"))
+  
+  cat("\n")
+  
+  
+  
+for(i in 1:length(modellist)){
+
+#Establish Model Type or Your Name
+ModelID=modellist[i]
+
+  
+ scdf <- read.csv(here(datadir,paste0(modellist[i],"_Pred"),paste0("2007_",trait,bluplist[i],".csv")))
+ colnames(scdf) <- c("LINE_UNIQUE_ID","Actual","Prediction")
+ 
+ 
+ #Heatmap
+ 
+  CombinedResults <- scdf
+   CombinedResults <- CombinedResults %>% arrange(desc(Prediction)) %>% mutate(PredictionRank = row_number()/nrow(CombinedResults))%>% 
+     arrange(desc(Actual)) %>% mutate(TraitRank = row_number()/nrow(CombinedResults))
+  
+#Create Percentile Accuracy Matrix
+  
+entry_n=count(CombinedResults)
+
+fourfour=(CombinedResults %>% 
+  filter(PredictionRank>.75&TraitRank>.75) %>% 
+  count())/entry_n/.25
+fourthree=(CombinedResults %>% 
+  filter(PredictionRank>.75&TraitRank>.50&TraitRank<.75) %>% 
+  count())/entry_n/.25
+fourtwo=(CombinedResults %>% 
+  filter(PredictionRank>.75&TraitRank>.25&TraitRank<.50) %>% 
+  count())/entry_n/.25
+fourone=(CombinedResults %>% 
+  filter(PredictionRank>.75&TraitRank<.25) %>% 
+  count())/entry_n/.25
+
+threefour=(CombinedResults %>% 
+  filter(PredictionRank>.50&PredictionRank<.75&TraitRank>.75) %>% 
+  count())/entry_n/.25
+threethree=(CombinedResults %>% 
+  filter(PredictionRank>.50&PredictionRank<.75&TraitRank>.50&TraitRank<.75) %>% 
+  count())/entry_n/.25
+threetwo=(CombinedResults %>% 
+  filter(PredictionRank>.50&PredictionRank<.75&TraitRank>.25&TraitRank<.50) %>% 
+  count())/entry_n/.25
+threeone=(CombinedResults %>% 
+  filter(PredictionRank>.50&PredictionRank<.75&TraitRank<.25) %>% 
+  count())/entry_n/.25
+
+twofour=(CombinedResults %>% 
+  filter(PredictionRank>.25&PredictionRank<.50&TraitRank>.75) %>% 
+  count())/entry_n/.25
+twothree=(CombinedResults %>% 
+  filter(PredictionRank>.25&PredictionRank<.50&TraitRank>.50&TraitRank<.75) %>% 
+  count())/entry_n/.25
+twotwo=(CombinedResults %>% 
+  filter(PredictionRank>.25&PredictionRank<.50&TraitRank>.25&TraitRank<.50) %>% 
+  count())/entry_n/.25
+twoone=(CombinedResults %>% 
+  filter(PredictionRank>.25&PredictionRank<.50&TraitRank<.25) %>% 
+  count())/entry_n/.25
+
+onefour=(CombinedResults %>% 
+  filter(PredictionRank<.25&TraitRank>.75) %>% 
+  count())/entry_n/.25
+onethree=(CombinedResults %>% 
+  filter(PredictionRank<.25&TraitRank>.50&TraitRank<.75) %>% 
+  count())/entry_n/.25
+onetwo=(CombinedResults %>% 
+  filter(PredictionRank<.25&TraitRank>.25&TraitRank<.50) %>% 
+  count())/entry_n/.25
+oneone=(CombinedResults %>% 
+  filter(PredictionRank<.25&TraitRank<.25) %>% 
+  count())/entry_n/.25
+
+comparison_matrix=tibble(Prediction_Quartile=paste0("Q",c(rep(1:4,each=4))),True_Quartile=as.factor(paste0("Q",c(rep(1:4,times=4)))),
+                          Value=as.numeric(c(oneone,onetwo,onethree,onefour,twoone,twotwo,twothree,twofour,threeone,threetwo,threethree,threefour,
+                                  fourone,fourtwo,fourthree,fourfour)))
+
+
+heatmap = ggplot(comparison_matrix, aes(Prediction_Quartile, True_Quartile)) +
+  geom_tile(aes(fill = Value)) +
+  geom_text(aes(label = round(Value, 4))) +
+  scale_fill_gradient(low = "red", high = "green",
+                      limits=c(0,0.6),oob=squish)+
+  scale_y_discrete(limits = c("Q4","Q3","Q2","Q1"))+
+  ggtitle(paste0("Accuracy_Matrix_2007_",ModelID,"_",trait))
+print(heatmap)
+ 
+ 
+# Calculate Statistics
+df <- scdf
+
+df <- df %>% arrange(desc(Prediction)) %>% mutate(PredictionRank = row_number()/nrow(df))%>% 
+     arrange(desc(Actual)) %>% mutate(ActualRank = row_number()/nrow(df))
+
+  Q4 <- df %>% filter(PredictionRank < 0.25 & ActualRank < 0.25)
+Q4 <- 4*nrow(Q4)/nrow(df)
+
+Q450 <- df %>% filter(PredictionRank < 0.50 & ActualRank < 0.25)
+Q450 <- 4*nrow(Q450)/nrow(df)
+
+Q1 <- df %>% filter(PredictionRank > 0.75 & ActualRank > 0.75)
+Q1 <- 4*nrow(Q1)/nrow(df)
+
+Q150 <- df %>% filter(PredictionRank > 0.50 & ActualRank > 0.75)
+Q150 <- 4*nrow(Q150)/nrow(df)
+
+Q2 <- df %>% filter(between(PredictionRank,0.50,0.75) & between(ActualRank,0.50,0.75))
+Q2 <- 4*nrow(Q2)/nrow(df)
+
+Q3 <- df %>% filter(between(PredictionRank,0.25,0.5) & between(ActualRank,0.25,0.5))
+Q3 <- 4*nrow(Q3)/nrow(df)
+
+top10 <- df %>% filter(PredictionRank < 0.1 & ActualRank < 0.1)
+top10 <- 10*nrow(top10)/nrow(df)
+
+top1025 <- df %>% filter(PredictionRank < 0.25 & ActualRank < 0.1)
+top1025 <- 10*nrow(top1025)/nrow(df)
+
+rmse <- df %>% mutate(resid = (PredictionRank - ActualRank)^2) %>% pull(resid) %>% mean() %>% sqrt
+
+corr <- cor(df$PredictionRank,df$ActualRank)
+
+globalstat <- c(Q1,Q2,Q3,Q4,Q150,Q450,top10,top1025,rmse,corr) %>% round(4)
+ 
+ statstable <- cbind(statstable,globalstat)
+ 
+}
+  
+  colnames(statstable) <- c("STAT",modellist)
+  print(knitr::kable(statstable, caption = "Model Correlation Statistics"))
+  
+ 
+   ## Calculate Genetic Statistics
+  
+  cat("\n\n\\pagebreak\n") 
+
+  cat(paste(trait," Genetic Accuracy"))
+  
+  cat("\n")
+  
+  statstable <- data.frame("STAT" = c("Bot25","25p50p","50p75p","Top25","bot25inbot50","Top25intop50","top10","top10in25","rmse","corr"))
+  
+for(i in 1:length(modellist)){
+
+#Establish Model Type or Your Name
+ModelID=modellist[i]
+
+  
+  
+  scdf <- read.csv(here(datadir,paste0(modellist[i],"_Pred"),paste0("2007_",trait,bluplist[i],".csv")))
+  colnames(scdf) <- c("LINE_UNIQUE_ID","Actual","Prediction")
+  
+  scdf <- scdf |> group_by(LINE_UNIQUE_ID) %>% summarize(Actual = mean(Actual), Prediction = mean(Prediction)) %>% ungroup()
+ 
+ 
+ 
+ #Heatmap
+ 
+  CombinedResults <- scdf
+   CombinedResults <- CombinedResults %>% arrange(desc(Prediction)) %>% mutate(PredictionRank = row_number()/nrow(CombinedResults))%>% 
+     arrange(desc(Actual)) %>% mutate(TraitRank = row_number()/nrow(CombinedResults))
+  
+#Create Percentile Accuracy Matrix
+  
+entry_n=count(CombinedResults)
+
+fourfour=(CombinedResults %>% 
+  filter(PredictionRank>.75&TraitRank>.75) %>% 
+  count())/entry_n/.25
+fourthree=(CombinedResults %>% 
+  filter(PredictionRank>.75&TraitRank>.50&TraitRank<.75) %>% 
+  count())/entry_n/.25
+fourtwo=(CombinedResults %>% 
+  filter(PredictionRank>.75&TraitRank>.25&TraitRank<.50) %>% 
+  count())/entry_n/.25
+fourone=(CombinedResults %>% 
+  filter(PredictionRank>.75&TraitRank<.25) %>% 
+  count())/entry_n/.25
+
+threefour=(CombinedResults %>% 
+  filter(PredictionRank>.50&PredictionRank<.75&TraitRank>.75) %>% 
+  count())/entry_n/.25
+threethree=(CombinedResults %>% 
+  filter(PredictionRank>.50&PredictionRank<.75&TraitRank>.50&TraitRank<.75) %>% 
+  count())/entry_n/.25
+threetwo=(CombinedResults %>% 
+  filter(PredictionRank>.50&PredictionRank<.75&TraitRank>.25&TraitRank<.50) %>% 
+  count())/entry_n/.25
+threeone=(CombinedResults %>% 
+  filter(PredictionRank>.50&PredictionRank<.75&TraitRank<.25) %>% 
+  count())/entry_n/.25
+
+twofour=(CombinedResults %>% 
+  filter(PredictionRank>.25&PredictionRank<.50&TraitRank>.75) %>% 
+  count())/entry_n/.25
+twothree=(CombinedResults %>% 
+  filter(PredictionRank>.25&PredictionRank<.50&TraitRank>.50&TraitRank<.75) %>% 
+  count())/entry_n/.25
+twotwo=(CombinedResults %>% 
+  filter(PredictionRank>.25&PredictionRank<.50&TraitRank>.25&TraitRank<.50) %>% 
+  count())/entry_n/.25
+twoone=(CombinedResults %>% 
+  filter(PredictionRank>.25&PredictionRank<.50&TraitRank<.25) %>% 
+  count())/entry_n/.25
+
+onefour=(CombinedResults %>% 
+  filter(PredictionRank<.25&TraitRank>.75) %>% 
+  count())/entry_n/.25
+onethree=(CombinedResults %>% 
+  filter(PredictionRank<.25&TraitRank>.50&TraitRank<.75) %>% 
+  count())/entry_n/.25
+onetwo=(CombinedResults %>% 
+  filter(PredictionRank<.25&TraitRank>.25&TraitRank<.50) %>% 
+  count())/entry_n/.25
+oneone=(CombinedResults %>% 
+  filter(PredictionRank<.25&TraitRank<.25) %>% 
+  count())/entry_n/.25
+
+comparison_matrix=tibble(Prediction_Quartile=paste0("Q",c(rep(1:4,each=4))),True_Quartile=as.factor(paste0("Q",c(rep(1:4,times=4)))),
+                          Value=as.numeric(c(oneone,onetwo,onethree,onefour,twoone,twotwo,twothree,twofour,threeone,threetwo,threethree,threefour,
+                                  fourone,fourtwo,fourthree,fourfour)))
+
+
+heatmap = ggplot(comparison_matrix, aes(Prediction_Quartile, True_Quartile)) +
+  geom_tile(aes(fill = Value)) +
+  geom_text(aes(label = round(Value, 4))) +
+  scale_fill_gradient(low = "red", high = "green",
+                      limits=c(0,0.6),oob=squish)+
+  scale_y_discrete(limits = c("Q4","Q3","Q2","Q1"))+
+  ggtitle(paste0("Accuracy_Matrix_2007_",ModelID,"_",trait))
+print(heatmap)
+ 
+ 
+# Calculate Statistics
+df <- scdf
+
+df <- df %>% arrange(desc(Prediction)) %>% mutate(PredictionRank = row_number()/nrow(df))%>% 
+     arrange(desc(Actual)) %>% mutate(ActualRank = row_number()/nrow(df))
+
+  Q4 <- df %>% filter(PredictionRank < 0.25 & ActualRank < 0.25)
+Q4 <- 4*nrow(Q4)/nrow(df)
+
+Q450 <- df %>% filter(PredictionRank < 0.50 & ActualRank < 0.25)
+Q450 <- 4*nrow(Q450)/nrow(df)
+
+Q1 <- df %>% filter(PredictionRank > 0.75 & ActualRank > 0.75)
+Q1 <- 4*nrow(Q1)/nrow(df)
+
+Q150 <- df %>% filter(PredictionRank > 0.50 & ActualRank > 0.75)
+Q150 <- 4*nrow(Q150)/nrow(df)
+
+Q2 <- df %>% filter(between(PredictionRank,0.50,0.75) & between(ActualRank,0.50,0.75))
+Q2 <- 4*nrow(Q2)/nrow(df)
+
+Q3 <- df %>% filter(between(PredictionRank,0.25,0.5) & between(ActualRank,0.25,0.5))
+Q3 <- 4*nrow(Q3)/nrow(df)
+
+top10 <- df %>% filter(PredictionRank < 0.1 & ActualRank < 0.1)
+top10 <- 10*nrow(top10)/nrow(df)
+
+top1025 <- df %>% filter(PredictionRank < 0.25 & ActualRank < 0.1)
+top1025 <- 10*nrow(top1025)/nrow(df)
+
+rmse <- df %>% mutate(resid = (PredictionRank - ActualRank)^2) %>% pull(resid) %>% mean() %>% sqrt
+
+corr <- cor(df$PredictionRank,df$ActualRank)
+
+globalstat <- c(Q1,Q2,Q3,Q4,Q150,Q450,top10,top1025,rmse,corr) %>% round(4)
+ 
+ statstable <- cbind(statstable,globalstat)
+ 
+}
+  
+  colnames(statstable) <- c("STAT",modellist)
+  print(knitr::kable(statstable, caption = "Model Correlation Statistics"))
+  
+  
+  
+   ## Calculate GxE Statistics
+  
+  cat("\n\n\\pagebreak\n") 
+
+  cat(paste(trait," Within Location Accuracy"))
+  
+  cat("\n")
+  
+  statstable <- data.frame("STAT" = c("Bot25","25p50p","50p75p","Top25","bot25inbot50","Top25intop50","top10","top10in25","rmse","corr"))
+  
+  i=3
+  
+for(i in 3){
+
+  locdf <- read.csv(paste0("Phenotype_Files/",trait,".csv")) |> filter(YEAR == 2007) |> 
+    select("LINE_UNIQUE_ID","LOC",trait)
+  
+  colnames(locdf) <- c("LINE_UNIQUE_ID","LOC","Actual")
+  
+#Establish Model Type or Your Name
+ModelID=modellist[i]
+
+  
+ scdf <- read.csv(here(datadir,paste0(modellist[i],"_Pred"),paste0("2007_",trait,bluplist[i],".csv")))
+  colnames(scdf) <- c("LINE_UNIQUE_ID","Actual","Prediction")
+  
+  scdf <- inner_join(scdf,locdf, by = join_by("LINE_UNIQUE_ID","Actual"))
+  
+ locidlist <- scdf %>% pull(LOC) %>% unique()
+ 
+ tempdf <- data.frame("Value" = c(rep(0,times=16)))
+ 
+ for(l in 1:length(locidlist)){
+ 
+ #Heatmap
+ 
+   locid <- locidlist[l]
+   
+  CombinedResults <- scdf %>% filter(LOC == locid)
+   CombinedResults <- CombinedResults %>% arrange(desc(Prediction)) %>% mutate(PredictionRank = row_number()/nrow(CombinedResults))%>% 
+     arrange(desc(Actual)) %>% mutate(TraitRank = row_number()/nrow(CombinedResults))
+  
+#Create Percentile Accuracy Matrix
+  
+entry_n=count(CombinedResults)
+
+fourfour=(CombinedResults %>% 
+  filter(PredictionRank>.75&TraitRank>.75) %>% 
+  count())/entry_n/.25
+fourthree=(CombinedResults %>% 
+  filter(PredictionRank>.75&TraitRank>.50&TraitRank<.75) %>% 
+  count())/entry_n/.25
+fourtwo=(CombinedResults %>% 
+  filter(PredictionRank>.75&TraitRank>.25&TraitRank<.50) %>% 
+  count())/entry_n/.25
+fourone=(CombinedResults %>% 
+  filter(PredictionRank>.75&TraitRank<.25) %>% 
+  count())/entry_n/.25
+
+threefour=(CombinedResults %>% 
+  filter(PredictionRank>.50&PredictionRank<.75&TraitRank>.75) %>% 
+  count())/entry_n/.25
+threethree=(CombinedResults %>% 
+  filter(PredictionRank>.50&PredictionRank<.75&TraitRank>.50&TraitRank<.75) %>% 
+  count())/entry_n/.25
+threetwo=(CombinedResults %>% 
+  filter(PredictionRank>.50&PredictionRank<.75&TraitRank>.25&TraitRank<.50) %>% 
+  count())/entry_n/.25
+threeone=(CombinedResults %>% 
+  filter(PredictionRank>.50&PredictionRank<.75&TraitRank<.25) %>% 
+  count())/entry_n/.25
+
+twofour=(CombinedResults %>% 
+  filter(PredictionRank>.25&PredictionRank<.50&TraitRank>.75) %>% 
+  count())/entry_n/.25
+twothree=(CombinedResults %>% 
+  filter(PredictionRank>.25&PredictionRank<.50&TraitRank>.50&TraitRank<.75) %>% 
+  count())/entry_n/.25
+twotwo=(CombinedResults %>% 
+  filter(PredictionRank>.25&PredictionRank<.50&TraitRank>.25&TraitRank<.50) %>% 
+  count())/entry_n/.25
+twoone=(CombinedResults %>% 
+  filter(PredictionRank>.25&PredictionRank<.50&TraitRank<.25) %>% 
+  count())/entry_n/.25
+
+onefour=(CombinedResults %>% 
+  filter(PredictionRank<.25&TraitRank>.75) %>% 
+  count())/entry_n/.25
+onethree=(CombinedResults %>% 
+  filter(PredictionRank<.25&TraitRank>.50&TraitRank<.75) %>% 
+  count())/entry_n/.25
+onetwo=(CombinedResults %>% 
+  filter(PredictionRank<.25&TraitRank>.25&TraitRank<.50) %>% 
+  count())/entry_n/.25
+oneone=(CombinedResults %>% 
+  filter(PredictionRank<.25&TraitRank<.25) %>% 
+  count())/entry_n/.25
+
+
+temp <- as.numeric(c(oneone,onetwo,onethree,onefour,twoone,twotwo,twothree,twofour,threeone,threetwo,threethree,threefour,
+                                  fourone,fourtwo,fourthree,fourfour))
+
+tempdf <- tempdf %>% mutate(Value = Value + nrow(CombinedResults)/nrow(scdf)*temp)
+
+}
+
+comparison_matrix=tibble(Prediction_Quartile=paste0("Q",c(rep(1:4,each=4))),True_Quartile=as.factor(paste0("Q",c(rep(1:4,times=4)))),
+                          Value=tempdf[,1])
+
+
+heatmap = ggplot(comparison_matrix, aes(Prediction_Quartile, True_Quartile)) +
+  geom_tile(aes(fill = Value)) +
+  geom_text(aes(label = round(Value, 4))) +
+  scale_fill_gradient(low = "red", high = "green",
+                      limits=c(0,0.6),oob=squish)+
+  scale_y_discrete(limits = c("Q4","Q3","Q2","Q1"))+
+  ggtitle(paste0("Accuracy_Matrix_2007_",ModelID,"_",trait))
+print(heatmap)
+ 
+
+tempstat <- data.frame("Value" = c(rep(0,times=10)))
+
+for(l in 1:length(locidlist)){
+ 
+# Calculate Statistics
+  
+
+  
+  locid <- locidlist[l]
+  
+df <- scdf %>% filter(LOC == locid)
+
+df <- df %>% arrange(desc(Prediction)) %>% mutate(PredictionRank = row_number()/nrow(df))%>% 
+     arrange(desc(Actual)) %>% mutate(ActualRank = row_number()/nrow(df))
+
+  Q4 <- df %>% filter(PredictionRank < 0.25 & ActualRank < 0.25)
+Q4 <- 4*nrow(Q4)/nrow(df)
+
+Q450 <- df %>% filter(PredictionRank < 0.50 & ActualRank < 0.25)
+Q450 <- 4*nrow(Q450)/nrow(df)
+
+Q1 <- df %>% filter(PredictionRank > 0.75 & ActualRank > 0.75)
+Q1 <- 4*nrow(Q1)/nrow(df)
+
+Q150 <- df %>% filter(PredictionRank > 0.50 & ActualRank > 0.75)
+Q150 <- 4*nrow(Q150)/nrow(df)
+
+Q2 <- df %>% filter(between(PredictionRank,0.50,0.75) & between(ActualRank,0.50,0.75))
+Q2 <- 4*nrow(Q2)/nrow(df)
+
+Q3 <- df %>% filter(between(PredictionRank,0.25,0.5) & between(ActualRank,0.25,0.5))
+Q3 <- 4*nrow(Q3)/nrow(df)
+
+top10 <- df %>% filter(PredictionRank < 0.1 & ActualRank < 0.1)
+top10 <- 10*nrow(top10)/nrow(df)
+
+top1025 <- df %>% filter(PredictionRank < 0.25 & ActualRank < 0.1)
+top1025 <- 10*nrow(top1025)/nrow(df)
+
+rmse <- df %>% mutate(resid = (PredictionRank - ActualRank)^2) %>% pull(resid) %>% mean() %>% sqrt
+
+corr <- cor(df$PredictionRank,df$ActualRank)
+
+globalstat <- as.numeric(c(Q1,Q2,Q3,Q4,Q150,Q450,top10,top1025,rmse,corr)) %>% round(4)
+ 
+tempstat <- tempstat %>% mutate(Value = Value + nrow(df)/nrow(scdf)*globalstat)
+
+ 
+}
+
+statstable <- cbind(statstable,tempstat[,1])
+  
+}
+  
+  colnames(statstable) <- c("STAT","XGB_Env")
+  print(knitr::kable(statstable, caption = "Model Correlation Statistics"))
+  
+}
+  
+```
+
+

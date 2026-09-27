@@ -1,0 +1,311 @@
+---
+title: "GBLUP / Ridge Regression Prediction Pipeline"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+library(here)
+library(dplyr)
+library(irlba)       # For fast randomized PCA
+library(glmnet)      # Extremely fast Ridge Regression (replaces BGLR for large datasets)
+library(matrixStats) # For ultra-fast column means
+```
+
+
+```{r}
+# --- Settings ---
+genodir <- "~/SyDAg_Hackathon/Genotype_Files/imputed_geno.csv"
+phenodir <- "~/SyDAg_Hackathon/Phenotype_Files"
+TRAIT_NAME <- "YLD_BE_BLUP"
+CV_Year = 2007
+
+N_ADD_PCS  <- 100
+N_DOM_PCS  <- 25
+SEED <- 123
+
+# --- Load Data ---
+
+genodf <- read.csv(genodir) %>% select(!c("X"))
+
+marker_cols <- colnames(genodf[2:1739])
+
+phenodf <- read.csv("Phenotype_Files/YLD_BE_BLUP_clean.csv") |> select(LINE_UNIQUE_ID,YLD_BE_BLUP,YEAR)
+
+testdf <- phenodf %>% filter(YEAR == 2007)
+traindf <- setdiff(phenodf,testdf)
+
+testdf <- testdf %>% inner_join(genodf, by = "LINE_UNIQUE_ID")
+traindf <- traindf %>% inner_join(genodf, by = "LINE_UNIQUE_ID")
+
+
+```
+
+
+
+```{r}
+cat("Preparing Training Features...\n")
+
+M_raw <- as.matrix(traindf[, marker_cols, drop = FALSE])
+
+
+# 3. Scale Markers
+M_scaled <- scale(M_raw)
+scale_centers <- attr(M_scaled, "scaled:center")
+scale_scales  <- attr(M_scaled, "scaled:scale")
+
+# 4. Additive PCA (using irlba for fast randomized SVD)
+set.seed(SEED)
+add_pca_model <- prcomp_irlba(M_scaled, n = N_ADD_PCS, center = FALSE, scale. = FALSE)
+X_add_train <- add_pca_model$x
+
+# Clean up memory
+rm(M_scaled)
+gc()
+
+# 5. Dominance Coding & PCA
+D <- matrix(0, nrow = nrow(M_raw), ncol = ncol(M_raw))
+D[M_raw == 1] <- 1.0
+
+# Free raw marker matrix as we no longer need it for training
+rm(M_raw)
+gc()
+
+dom_pca_model <- prcomp_irlba(D, n = N_DOM_PCS, center = FALSE, scale. = FALSE)
+X_dom_train <- dom_pca_model$x
+
+rm(D)
+gc()
+
+
+# 9. Final Design Matrix
+X_train <- cbind(X_add_train, X_dom_train)
+y_train <- traindf[[TRAIT_NAME]]
+
+# Clean up intermediate matrices before training
+rm(X_add_train, X_dom_train, X_env_train, GXE_add_train, GXE_dom_train, df_train)
+gc()
+```
+
+
+```{r}
+cat("Fitting Ridge Regression Model on ~", nrow(X_train), "samples...\n")
+
+# Use cross-validation to find the best Ridge penalty.
+# nfolds = 5 keeps it relatively fast.
+set.seed(SEED)
+cv_fit <- cv.glmnet(
+  x = X_train, 
+  y = y_train, 
+  alpha = 0,          # 0 = Ridge, 1 = Lasso
+  nfolds = 5,
+  standardize = FALSE # We already scaled our inputs
+)
+
+# Best model is automatically stored in cv_fit
+cat("Model training complete.\n")
+
+# Free the massive training matrix
+rm(X_train, y_train)
+gc()
+```
+
+```{r}
+
+M_raw_test <- as.matrix(testdf[, marker_cols, drop = FALSE])
+
+
+# 2. Scale using TRAINING centers and scales
+M_scaled_test <- scale(M_raw_test, center = scale_centers, scale = scale_scales)
+
+# 3. Additive PCA Projection
+X_add_test <- M_scaled_test %*% add_pca_model$rotation
+
+rm(M_scaled_test)
+gc()
+
+# 4. Dominance Coding & PCA Projection
+D_test <- matrix(0, nrow = nrow(M_raw_test), ncol = ncol(M_raw_test))
+D_test[M_raw_test == 1] <- 1.0
+
+X_dom_test <- D_test %*% dom_pca_model$rotation
+
+rm(M_raw_test, D_test)
+gc()
+
+
+# 8. Final Test Design Matrix
+X_test <- cbind(X_add_test, X_dom_test)
+
+rm(X_add_test, X_dom_test, X_env_test, GXE_add_test, GXE_dom_test)
+gc()
+```
+
+
+
+```{r}
+
+# Predict using the model lambda that minimizes mean squared error
+predictions <- predict(cv_fit, newx = X_test, s = "lambda.min")
+
+# Append predictions to the test dataframe
+resultsdf <- testdf %>% select(LINE_UNIQUE_ID,YLD_BE_BLUP)
+
+resultsdf$Prediction <- as.numeric(predictions)
+
+
+# Save output
+write.csv(resultsdf, here("GBLUP_Pred",paste0(CV_Year,"_",TRAIT_NAME,".csv")), row.names = FALSE)
+cat("Predictions saved to:", output_file, "\n")
+```
+
+
+
+# GBLUP Prediction Loop
+
+```{r}
+genodir <- "~/SyDAg_Hackathon/Genotype_Files/imputed_geno.csv"
+phenodir <- "~/SyDAg_Hackathon/Phenotype_Files"
+traitlist <- c("YLD_BE_BLUP","PHT_BLUP","TWT_BLUP")
+yearlist <- c(2000,2001,2002,2003,2004,2005,2006,2007,2008)
+
+N_ADD_PCS  <- 100
+N_DOM_PCS  <- 25
+SEED <- 123
+
+# --- Load Data ---
+
+genodf <- read.csv(genodir) %>% select(!c("X"))
+
+marker_cols <- colnames(genodf[2:1739])
+
+t=1
+y=1
+
+for(t in 2:3){
+
+  TRAIT_NAME <- traitlist[t]
+  
+phenodf <- read.csv(paste0("Phenotype_Files/",TRAIT_NAME,"_clean.csv")) |> select("LINE_UNIQUE_ID",TRAIT_NAME,"YEAR")
+
+for(y in 1:9){
+
+  CV_Year = yearlist[y]
+  
+testdf <- phenodf %>% filter(YEAR == CV_Year)
+traindf <- setdiff(phenodf,testdf)
+
+testdf <- testdf %>% inner_join(genodf, by = "LINE_UNIQUE_ID")
+traindf <- traindf %>% inner_join(genodf, by = "LINE_UNIQUE_ID")
+
+
+M_raw <- as.matrix(traindf[, marker_cols, drop = FALSE])
+
+
+# 3. Scale Markers
+M_scaled <- scale(M_raw)
+scale_centers <- attr(M_scaled, "scaled:center")
+scale_scales  <- attr(M_scaled, "scaled:scale")
+
+# 4. Additive PCA (using irlba for fast randomized SVD)
+set.seed(SEED)
+add_pca_model <- prcomp_irlba(M_scaled, n = N_ADD_PCS, center = FALSE, scale. = FALSE)
+X_add_train <- add_pca_model$x
+
+# Clean up memory
+rm(M_scaled)
+gc()
+
+# 5. Dominance Coding & PCA
+D <- matrix(0, nrow = nrow(M_raw), ncol = ncol(M_raw))
+D[M_raw == 1] <- 1.0
+
+# Free raw marker matrix as we no longer need it for training
+rm(M_raw)
+gc()
+
+dom_pca_model <- prcomp_irlba(D, n = N_DOM_PCS, center = FALSE, scale. = FALSE)
+X_dom_train <- dom_pca_model$x
+
+rm(D)
+gc()
+
+
+# 9. Final Design Matrix
+X_train <- cbind(X_add_train, X_dom_train)
+y_train <- traindf[[TRAIT_NAME]]
+
+# Clean up intermediate matrices before training
+rm(X_add_train, X_dom_train, X_env_train, GXE_add_train, GXE_dom_train, df_train)
+gc()
+
+
+
+cat("Fitting Ridge Regression Model on ~", nrow(X_train), "samples...\n")
+
+# Use cross-validation to find the best Ridge penalty.
+# nfolds = 5 keeps it relatively fast.
+set.seed(SEED)
+cv_fit <- cv.glmnet(
+  x = X_train, 
+  y = y_train, 
+  alpha = 0,          # 0 = Ridge, 1 = Lasso
+  nfolds = 5,
+  standardize = FALSE # We already scaled our inputs
+)
+
+# Best model is automatically stored in cv_fit
+cat("Model training complete.\n")
+
+# Free the massive training matrix
+rm(X_train, y_train)
+gc()
+
+M_raw_test <- as.matrix(testdf[, marker_cols, drop = FALSE])
+
+
+# 2. Scale using TRAINING centers and scales
+M_scaled_test <- scale(M_raw_test, center = scale_centers, scale = scale_scales)
+
+# 3. Additive PCA Projection
+X_add_test <- M_scaled_test %*% add_pca_model$rotation
+
+rm(M_scaled_test)
+gc()
+
+# 4. Dominance Coding & PCA Projection
+D_test <- matrix(0, nrow = nrow(M_raw_test), ncol = ncol(M_raw_test))
+D_test[M_raw_test == 1] <- 1.0
+
+X_dom_test <- D_test %*% dom_pca_model$rotation
+
+rm(M_raw_test, D_test)
+gc()
+
+
+# 8. Final Test Design Matrix
+X_test <- cbind(X_add_test, X_dom_test)
+
+rm(X_add_test, X_dom_test, X_env_test, GXE_add_test, GXE_dom_test)
+gc()
+
+
+# Predict using the model lambda that minimizes mean squared error
+predictions <- predict(cv_fit, newx = X_test, s = "lambda.min")
+
+# Append predictions to the test dataframe
+resultsdf <- testdf %>% select("LINE_UNIQUE_ID",TRAIT_NAME)
+
+resultsdf$Prediction <- as.numeric(predictions)
+
+
+# Save output
+write.csv(resultsdf, here("GBLUP_Pred",paste0(CV_Year,"_",TRAIT_NAME,".csv")), row.names = FALSE)
+
+
+}}
+```
+
+
+

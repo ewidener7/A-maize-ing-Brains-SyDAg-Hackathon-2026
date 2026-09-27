@@ -1,0 +1,12 @@
+#!/bin/bash
+#SBATCH --job-name=xgb_blup
+#SBATCH --output=logs/xgb_%j.out
+#SBATCH --error=logs/xgb_%j.err
+#SBATCH --partition=cpu
+#SBATCH --account=agronomy
+#SBATCH --ntasks=1
+#SBATCH --cpus-per-task=1
+#SBATCH --mem=60G
+#SBATCH --time=06:00:00
+module load r/4.5
+Rscript XGB_BLUP_Slurm.R

@@ -1,0 +1,109 @@
+---
+title: "Genotype_QC"
+author: "Chris Barron"
+date: "2026-09-26"
+output: html_document
+---
+
+```{r}
+library(data.table)
+library(dplyr)
+library(tidyr)
+
+# Load data
+geno <- fread(geno_path1)
+
+# Identifier column(s)
+id_cols <- c("V1", "LINE_UNIQUE_ID", "CLUSTER", "FAMILY", "LINE", "PARENT_1", "PARENT_2")
+
+# All genotype/marker columns
+markers <- setdiff(names(geno), id_cols)
+
+# Make sure markers are numeric
+geno[, (markers) := lapply(.SD, as.numeric), .SDcols = markers]
+```
+
+```{r}
+unique_values <- sort(unique(unlist(geno[, ..markers])))
+unique_values
+```
+
+Marker missingness
+```{r}
+marker_missing <- data.frame(
+  marker = markers,
+  missing_rate = sapply(
+    geno[, ..markers],
+    function(x) mean(is.na(x))
+  )
+)
+
+summary(marker_missing$missing_rate)
+```
+
+```{r}
+good_markers <- marker_missing %>%
+  filter(missing_rate <= 0.15) %>%
+  pull(marker)
+
+#at 0.15 missingness we lose 841 markers 
+```
+
+Individual missingness
+```{r}
+sample_missing <- data.frame(
+  LINE = geno$LINE_UNIQUE_ID,
+  missing_rate = rowMeans(
+    is.na(as.matrix(geno[, ..markers]))
+  )
+)
+
+summary(sample_missing$missing_rate)
+```
+
+```{r}
+good_lines <- sample_missing %>%
+  filter(missing_rate <= 0.15) %>%
+  pull(LINE)
+
+#at a sample missing rate of 0.15 we lose 39,072 progeny
+```
+
+```{r}
+geno_qc <- geno %>%
+  dplyr::filter(LINE_UNIQUE_ID %in% good_lines) %>%
+  dplyr::select(LINE_UNIQUE_ID, all_of(good_markers))
+```
+
+MAF
+```{r}
+maf <- sapply(
+  geno_qc[, ..good_markers],
+  function(x) {
+    p <- (mean(x, na.rm = TRUE) + 1) / 2
+    min(p, 1 - p)
+  }
+)
+```
+
+```{r}
+maf_df <- data.frame(
+  marker = names(maf),
+  MAF = maf)
+
+summary(maf_df$MAF)
+```
+
+```{r}
+final_markers <- maf_df %>%
+  filter(MAF >= 0.05) %>%
+  pull(marker)
+```
+
+```{r}
+geno_final <- geno_qc %>%
+  dplyr::select(LINE_UNIQUE_ID, all_of(final_markers))
+
+write.csv(geno_final)
+```
+

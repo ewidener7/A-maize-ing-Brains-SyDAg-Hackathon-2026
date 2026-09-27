@@ -1,0 +1,186 @@
+---
+title: "Accuracy Metric Calculation"
+output: html_document
+date: "2026-09-27"
+---
+
+```{r setup, include=FALSE}
+library(dplyr)
+library(tidyr)
+library(gt)
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+# Data Directories, Validation, Models, and Traits
+model_list <- c("GBLUP","XGB_BLUP","XGB_Env")
+trait_list <- c("YLD_BE","TWT","PHT")
+blup <- c("_BLUP","_BLUP","")
+validation_list <- c(2000,2001,2002,2003,2004,2005,2006,2007,2008)
+
+combdf <- NULL
+
+# calculate metrics for each fold
+
+for(t in 1:3){
+  for(m in 1:3){
+    for(v in 1:9){
+      
+      model <- model_list[m]
+      trait_file <- paste0(trait_list[t],blup[m])
+      trait <- trait_list[t]
+      fold <- validation_list[v]
+      
+      df <- read.csv(paste0(model,"_Pred/",fold,"_",trait_file,".csv"))
+      colnames(df) <- c("LINE_UNIQUE_ID","Actual","Prediction")
+      
+      count <- nrow(df)
+      
+      # RMSE
+      df <- df %>% summarize(
+      
+    RMSE = sqrt(mean((Actual - Prediction)^2, na.rm = TRUE)),
+    
+    # R2 (Pearson Correlation Squared)
+    R2 = cor(Actual, Prediction, use = "complete.obs")^2,
+    
+    # Top 10% Rank Accuracy: % of true top 10% predicted in top 10%
+    Top_10_Accuracy = sum(Actual >= quantile(Actual, 0.90) & 
+                          Prediction >= quantile(Prediction, 0.90)) / 
+                      sum(Actual >= quantile(Actual, 0.90)),
+    
+    # Top 25% Rank Accuracy: % of true top 25% predicted in top 25%
+    Top_25_Accuracy = sum(Actual >= quantile(Actual, 0.75) & 
+                          Prediction >= quantile(Prediction, 0.75)) / 
+                      sum(Actual >= quantile(Actual, 0.75)),
+    
+    # Bottom 25% in Top 25%: % of true bottom 25% mistakenly predicted as top 25%
+    Bot_25_in_Top_25 = sum(Actual <= quantile(Actual, 0.25) & 
+                           Prediction >= quantile(Prediction, 0.75)) / 
+                       sum(Actual <= quantile(Actual, 0.25)))
+    
+    stat_vec <- df %>% mutate(Model = model, Fold = fold, Trait = trait,N = count)
+    
+    combdf <- rbind(combdf,stat_vec)
+      
+      
+    }
+  }
+}
+
+# QUuantify Uncertainty across folds
+
+summary_df <- combdf %>%
+  group_by(Model, Trait) %>%
+  summarise(
+    N = n(),
+    
+    RMSE_mean = mean(RMSE),
+    RMSE_sd = sd(RMSE),
+    
+    R2_mean = mean(R2),
+    R2_sd = sd(R2),
+    
+    Top_10_mean = mean(Top_10_Accuracy),
+    Top_10_sd = sd(Top_10_Accuracy),
+    
+    Top_25_mean = mean(Top_25_Accuracy),
+    Top_25_sd = sd(Top_25_Accuracy),
+    
+    Bot_25_Top_25_mean = mean(Bot_25_in_Top_25),
+    Bot_25_Top_25_sd = sd(Bot_25_in_Top_25),
+    
+    .groups = "drop"
+  )
+
+
+# Desired order
+trait_order <- c("YLD_BE", "TWT", "PHT")
+model_order <- c("GBLUP", "XGB_BLUP", "XGB_Env")
+
+# Format mean ± SD
+display_long <- summary_df %>%
+  mutate(
+    RMSE = sprintf("%.3f ± %.3f", RMSE_mean, RMSE_sd),
+    R2 = sprintf("%.3f ± %.3f", R2_mean, R2_sd),
+    Top_10 = sprintf("%.3f ± %.3f", Top_10_mean, Top_10_sd),
+    Top_25 = sprintf("%.3f ± %.3f", Top_25_mean, Top_25_sd),
+    Bot_25_Top_25 = sprintf(
+      "%.3f ± %.3f",
+      Bot_25_Top_25_mean,
+      Bot_25_Top_25_sd
+    )
+  ) %>%
+  select(
+    Trait, Model,
+    RMSE, R2, Top_10, Top_25, Bot_25_Top_25
+  ) %>%
+  pivot_longer(
+    cols = c(RMSE, R2, Top_10, Top_25, Bot_25_Top_25),
+    names_to = "Metric",
+    values_to = "Value"
+  )
+
+# Force desired Trait × Model order
+display_long <- display_long %>%
+  mutate(
+    Trait = factor(Trait, levels = trait_order),
+    Model = factor(Model, levels = model_order)
+  ) %>%
+  arrange(Trait, Model)
+
+# Make wide table
+display_df <- display_long %>%
+  pivot_wider(
+    names_from = c(Trait, Model),
+    values_from = Value
+  )
+
+
+display_df %>%
+  gt(rowname_col = "Metric") %>%
+  cols_label(
+    Metric = "Accuracy Metric",
+
+    YLD_BE_GBLUP = "GBLUP",
+    YLD_BE_XGB_BLUP = "XGB_BLUP",
+    YLD_BE_XGB_Env = "XGB_Env",
+
+    TWT_GBLUP = "GBLUP",
+    TWT_XGB_BLUP = "XGB_BLUP",
+    TWT_XGB_Env = "XGB_Env",
+
+    PHT_GBLUP = "GBLUP",
+    PHT_XGB_BLUP = "XGB_BLUP",
+    PHT_XGB_Env = "XGB_Env"
+  ) %>%
+  tab_spanner(
+    label = "YLD_BE",
+    columns = c(
+      YLD_BE_GBLUP,
+      YLD_BE_XGB_BLUP,
+      YLD_BE_XGB_Env
+    )
+  ) %>%
+  tab_spanner(
+    label = "TWT",
+    columns = c(
+      TWT_GBLUP,
+      TWT_XGB_BLUP,
+      TWT_XGB_Env
+    )
+  ) %>%
+  tab_spanner(
+    label = "PHT",
+    columns = c(
+      PHT_GBLUP,
+      PHT_XGB_BLUP,
+      PHT_XGB_Env
+    )
+  )
+```
+
+
+
+
+

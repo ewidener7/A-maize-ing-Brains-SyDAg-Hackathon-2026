@@ -1,0 +1,191 @@
+---
+title: "Prediction_Demo"
+author: "Chris Barron"
+date: "2026-09-27"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+# Make Demo Datasets
+
+```{r}
+genodf <- read.csv("Genotype_Files/proportion_imputed_geno.csv")
+
+genodf <- genodf[2:1740,2:1740]
+
+write.csv(genodf,"Demo_Data/Genotype/Chris_Geno.csv")
+
+weather <- read.csv("Weather_Data/4GS_Binned_Weather_Data_Mean.csv")
+
+weather <- weather[6:14,]
+
+write.csv(weather,"Demo_Data/Environment/Chris_locs.csv")
+
+```
+
+
+# Demo Function
+
+```{r}
+library(xgboost)
+library(dplyr)
+
+predict_xgb_model <- function(
+    traitlist,
+    genotype_path,
+    environment_path,
+    model_name,
+    genotype_id_col = "LINE_UNIQUE_ID",
+    environment_id_col = "LOC_YEAR",
+    output_path = "Demo_Data/Predictions"
+) {
+  
+  # ---------------------------------------------------------
+  # 1. Load model
+  # ---------------------------------------------------------
+
+  full_results <- NULL
+  
+  for(t in 1:length(traitlist)){
+    
+    trait = traitlist[t]
+    
+  model_path <- file.path(
+    "Demo_Data/Models",
+    trait,
+    paste0(model_name, ".json")
+  )
+  
+  if (!file.exists(model_path)) {
+    stop("Model file not found: ", model_path)
+  }
+  
+  model <- xgb.load(model_path)
+  
+  
+  # ---------------------------------------------------------
+  # 2. Load genotype and environmental data
+  # ---------------------------------------------------------
+  
+  genotype <- read.csv(genotype_path)
+  environment <- read.csv(environment_path)
+  
+  
+  # ---------------------------------------------------------
+  # 3. Save identifiers
+  # ---------------------------------------------------------
+  
+  genotype_ids <- genotype[[genotype_id_col]]
+  environment_ids <- environment[[environment_id_col]]
+  
+  
+  # ---------------------------------------------------------
+  # 4. Remove identifier columns
+  # ---------------------------------------------------------
+  
+  genotype_x <- genotype |>
+    select(-c(all_of(genotype_id_col),"X"))
+  
+  environment_x <- environment |>
+    select(last_col(offset = 23):last_col())
+  
+  
+  # ---------------------------------------------------------
+  # 5. Create prediction combinations
+  # ---------------------------------------------------------
+  
+  # Every genotype × environment combination
+  prediction_df <- expand.grid(
+    genotype_id = genotype_ids,
+    environment_id = environment_ids,
+    KEEP.OUT.ATTRS = FALSE,
+    stringsAsFactors = FALSE
+  )
+  
+  
+  # ---------------------------------------------------------
+  # 6. Create feature matrix
+  # ---------------------------------------------------------
+  
+  # Repeat genotype data for every environment
+  genotype_rep <- genotype_x[
+    match(prediction_df$genotype_id, genotype_ids),
+    ,
+    drop = FALSE
+  ]
+  
+  # Repeat environmental data for every genotype
+  environment_rep <- environment_x[
+    match(prediction_df$environment_id, environment_ids),
+    ,
+    drop = FALSE
+  ]
+  
+  rownames(genotype_rep) <- NULL
+  rownames(environment_rep) <- NULL
+  
+  prediction_matrix <- cbind(
+    genotype_rep,
+    environment_rep
+  )
+  
+  
+  # ---------------------------------------------------------
+  # 7. Make predictions
+  # ---------------------------------------------------------
+  
+  predictions <- predict(
+    model,
+    newdata = as.matrix(prediction_matrix)
+  )
+  
+  
+  # ---------------------------------------------------------
+  # 8. Combine results
+  # ---------------------------------------------------------
+  
+  results <- prediction_df |>
+    mutate(
+      Trait = trait,
+      Prediction = predictions
+    )
+  
+  
+  full_results <- rbind(full_results,results)
+  
+  # ---------------------------------------------------------
+  # 9. Optionally save predictions
+  # ---------------------------------------------------------
+  
+  if (!is.null(output_path)) {
+    write.csv(
+      results,
+      paste0(output_path,"/",trait,"_",model_name,".csv"),
+      row.names = FALSE
+    )
+  }
+  
+  }
+  
+  return(results)
+
+}
+
+```
+
+
+```{r}
+YLD_predictions <- predict_xgb_model(
+    traitlist = c("YLD_BE","PHT","TWT"),
+    genotype_path = "Demo_Data/Genotype/Chris_geno.csv",
+    environment_path = "Demo_Data/Environment/Chris_locs.csv",
+    model_name = "XGB_2007"
+)
+
+```
+
+

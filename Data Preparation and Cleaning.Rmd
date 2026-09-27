@@ -1,0 +1,575 @@
+---
+title: "Data Preparation and Cleaning"
+author: "Chris Barron"
+date: "2026-09-26"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(tidyverse)
+library(here)
+library(lme4)
+library(dplyr)
+```
+
+# Data Loading
+
+```{r}
+pheno_c1 <- read.csv(here("Phenotype_Files","C1_Phenotype_Data_V2.csv")) |> 
+  select(LOC,LATITUDE,LONGITUDE,shorthand_x,LINE,ERM,PHT,TWT,YLD_BE,CLUSTER,LINE_UNIQUE_ID,YEAR_x) |> 
+  setNames(c("LOC","LATITUDE","LONGITUDE","FAMILY","LINE","ERM","PHT","TWT","YLD_BE","CLUSTER",
+             "LINE_UNIQUE_ID","YEAR"))
+pheno_c2 <- read.csv(here("Phenotype_Files","C2_Phenotype_Data_V2.csv")) |> 
+  select(LOC,LATITUDE,LONGITUDE,shorthand_x,LINE,ERM,PHT,TWT,YLD_BE,CLUSTER,LINE_UNIQUE_ID,YEAR_x) |> 
+  setNames(c("LOC","LATITUDE","LONGITUDE","FAMILY","LINE","ERM","PHT","TWT","YLD_BE","CLUSTER",
+             "LINE_UNIQUE_ID","YEAR"))
+pheno_comb <- rbind(pheno_c1,pheno_c2)
+
+weather_dir <- "Weather_Data/historical_weather_2000_2008.csv"
+```
+
+
+## Make file with only ERM for each genotype
+
+```{r}
+erm_df <- pheno_comb |> select(CLUSTER,FAMILY,LINE,LINE_UNIQUE_ID,ERM) |>
+  group_by(CLUSTER,FAMILY,LINE,LINE_UNIQUE_ID) |> 
+  summarize(ERM = mean(ERM, na.rm = TRUE)) |> ungroup()
+
+na_family <- erm_df |> filter(is.na(ERM)) |> pull(FAMILY) |> unique()
+
+na_lines <- erm_df |> filter(is.na(ERM)) |> unique()
+
+family_erm <- pheno_comb |> select(FAMILY,ERM) |> filter(FAMILY %in% na_family) |> group_by(FAMILY) |> 
+  summarize(ERM = mean(ERM, na.rm = TRUE)) |> ungroup()
+
+erm_df2 <- na_lines |> select(!c(ERM)) |> left_join(family_erm,by = join_by(FAMILY))
+
+na_lines <- erm_df2 |> filter(is.na(ERM)) |> unique() |> select(!c("ERM"))
+
+cluster_erm <- pheno_comb |> select(CLUSTER,ERM) |> group_by(CLUSTER) |> 
+  summarize(ERM = mean(ERM, na.rm = TRUE))
+
+na_lines <- na_lines |> left_join(cluster_erm,by = "CLUSTER")
+
+# First impute where family ERM is availble and then impute with cluster ERM
+
+erm_full <- rbind(erm_df,erm_df2,na_lines) |> na.omit()
+
+# One line has ERM of 240, impute with cluster average
+
+erm_full <- erm_full |> mutate(ERM = if_else(ERM > 200, 108, round(ERM,0)))
+
+# End with 90 uniqe estimated relative maturities (73 to 168)
+
+write.csv(erm_full,here("Weather_Data","ALL_ERM.csv"))
+```
+
+## Make a file with latitude and longitude of each location
+
+```{r}
+loc_df <- pheno_comb |> select(LOC,LATITUDE,LONGITUDE) |> unique() |> na.omit()
+
+write.csv(loc_df,here("Weather_Data","Loc_Alt_Long.csv"))
+
+```
+
+## Calcualte BLUP values for PLT, TWT, and YLD_BE
+
+```{r}
+
+traits <- c("YLD_BE", "PHT", "TWT")
+
+# 1. Create a base dataframe of all unique Genotype & Year combinations present
+blup_results <- pheno_comb %>%
+  select(LINE_UNIQUE_ID, YEAR) %>%
+  unique()
+
+for (trait in traits) {
+  
+  # 2. Define the model with Genotype:Year interaction
+  formula_str <- paste(trait, "~ (1 | LINE_UNIQUE_ID) + (1 | LOC) + (1 | YEAR) +",
+                       "(1 | LINE_UNIQUE_ID:YEAR) + (1 | LOC:YEAR)")
+  
+  # Remove all NA values and create dataframe that represents unbalanced data
+  
+  trait_data <- pheno_comb %>%
+    filter(!is.na(.data[[trait]]))
+  
+  trait_newdata <- trait_data %>%
+    select(LINE_UNIQUE_ID, YEAR) %>%
+    distinct()
+  
+  # 3. Fit the model
+  model <- lmer(as.formula(formula_str), data = trait_data)
+  
+  # 4. Use predict() to calculate the Genotype-by-Year BLUP
+  # re.form tells the model to include the grand mean, genotype main effect, 
+  # year main effect, and their interaction, while treating loc_ID as 0 (population mean)
+  trait_newdata[[paste0(trait, "_BLUP")]] <- predict(
+    model, 
+    newdata = trait_newdata, 
+    re.form = ~(1 | LINE_UNIQUE_ID) + (1 | YEAR) + (1 | LINE_UNIQUE_ID:YEAR)
+  )
+  
+  write.csv(trait_newdata,here("Phenotype_Files",paste0(trait,"_BLUP.csv")))
+}
+
+# View the long-format results (one row per genotype-year combination)
+head(blup_results)
+
+# ---------------------------------------------------------
+# OPTIONAL: Pivot to wide format 
+# This reshapes the data so you get exactly one row per genotype
+# with columns like YLD_BE_BLUP_2021, YLD_BE_BLUP_2022, etc.
+# ---------------------------------------------------------
+blup_results_wide <- blup_results %>%
+  pivot_wider(
+    names_from = year, 
+    values_from = ends_with("_BLUP"),
+    names_sep = "_"
+  )
+
+head(blup_results_wide)
+```
+
+## Load and Collapse all Files
+
+```{r}
+library(data.table)
+
+# Directory containing your files
+input_dir <- "Genotype_Files/ImputedC1Populations/ImputedPopulationsC1"
+
+# Get all files in the directory
+files <- list.files(
+  input_dir,
+  pattern = "\\.csv$",
+  full.names = TRUE
+)
+
+# Start with an empty data.table
+progeny_combined <- NULL
+parents_combined <- NULL
+
+i=1
+
+markers <- colnames(dat[,2:2912])
+
+# Loop through each file
+for (i in seq_along(files)) {
+
+  # Current file
+  file <- files[i]
+
+  # Get file name without extension
+  file_name <- tools::file_path_sans_ext(basename(file))
+
+  # Read the file
+  dat <- fread(
+  file,
+  colClasses = list(character = "V1")
+  )
+  
+  dat <- dat %>%
+  mutate(
+    V1 = if_else(
+      str_detect(V1, "^[0-9]+$"),
+      str_remove(V1, "^0+(?=\\d)"),
+      V1
+    )
+  )
+  
+  Parent1 <- pull(dat[1,1])
+  Parent2 <- pull(dat[2,1])
+  Family <- sub("_.*", "", file_name)
+  Cluster <- 1
+  
+  parent_temp <- dat[1:2,]
+  
+  parent_temp <- parent_temp |> rename("LINE" = "V1") |> select(LINE,all_of(markers))
+  
+  rown <- nrow(dat)
+  
+  progeny_temp <- dat[3:rown,]
+
+  progeny_temp <- progeny_temp |> rename("LINE" = "V1") |>
+    mutate(CLUSTER = Cluster) |> 
+    mutate(FAMILY = Family) |> mutate(LINE_UNIQUE_ID = paste0(FAMILY,".",LINE)) |> 
+    mutate(PARENT_1 = Parent1) |> mutate(PARENT_2 = Parent2)
+  
+  progeny_temp <- progeny_temp |> select(LINE_UNIQUE_ID,CLUSTER,FAMILY,LINE,PARENT_1,
+                                         PARENT_2,all_of(markers))
+  
+  progeny_combined <- rbind(progeny_combined,progeny_temp)
+  parents_combined <- rbind(parents_combined,parent_temp)
+
+  
+  }
+
+
+
+input_dir <- "Genotype_Files/ImputedC2Populations/ImputedPopulationsC2"
+
+# Get all files in the directory
+files <- list.files(
+  input_dir,
+  pattern = "\\.csv$",
+  full.names = TRUE
+)
+
+
+# Loop through each file
+for (i in seq_along(files)) {
+
+  # Current file
+  file <- files[i]
+
+  # Get file name without extension
+  file_name <- tools::file_path_sans_ext(basename(file))
+
+  # Read the file
+  dat <- fread(
+  file,
+  colClasses = list(character = "V1")
+  )
+  
+  dat <- dat %>%
+  mutate(
+    V1 = if_else(
+      str_detect(V1, "^[0-9]+$"),
+      str_remove(V1, "^0+(?=\\d)"),
+      V1
+    )
+  )
+  
+  Parent1 <- pull(dat[1,1])
+  Parent2 <- pull(dat[2,1])
+  Family <- sub("_.*", "", file_name)
+  Cluster <- 2
+  
+  parent_temp <- dat[1:2,]
+  
+  parent_temp <- parent_temp |> rename("LINE" = "V1") |> select(LINE,all_of(markers))
+  
+  rown <- nrow(dat)
+  
+  progeny_temp <- dat[3:rown,]
+
+  progeny_temp <- progeny_temp |> rename("LINE" = "V1") |>
+    mutate(CLUSTER = Cluster) |> 
+    mutate(FAMILY = Family) |> mutate(LINE_UNIQUE_ID = paste0(FAMILY,".",LINE)) |> 
+    mutate(PARENT_1 = Parent1) |> mutate(PARENT_2 = Parent2)
+  
+  progeny_temp <- progeny_temp |> select(LINE_UNIQUE_ID,CLUSTER,FAMILY,LINE,PARENT_1,
+                                         PARENT_2,all_of(markers))
+  
+  progeny_combined <- rbind(progeny_combined,progeny_temp)
+  parents_combined <- rbind(parents_combined,parent_temp)
+
+  
+}
+
+# Check that all are unique
+
+test <- progeny_combined |> unique()
+test_parent <- parents_combined |> unique()
+
+# Use only Line IDs included in phenotype
+#Manually make Line IDs becuase some error in phenotype file
+
+lines <- pheno_comb |> mutate(LINE_UNIQUE_ID = paste0(FAMILY,".",LINE)) |> pull(LINE_UNIQUE_ID) |>
+  unique()
+reduced <- progeny_combined |> filter(LINE_UNIQUE_ID %in% lines) |> unique()
+
+
+line1 <- reduced |> pull(LINE_UNIQUE_ID) |> unique()
+
+
+write.csv(reduced,"Genotype_Files/All_Progeny.csv")
+write.csv(test_parent, "Genotype_Files/All_Parents.csv")
+
+
+
+
+```
+
+
+
+### Remove Outliers
+
+```{r}
+# Clean the raw phenotypic data
+
+# YLD_BE
+
+yld_df <- pheno_comb |> select(FAMILY,LINE,YLD_BE,LOC,YEAR) |> 
+  mutate(LINE_UNIQUE_ID = paste0(FAMILY,".",LINE)) |> na.omit()
+
+
+dfouts <- yld_df %>% mutate_if(is.numeric,scale) %>% mutate(across(is.numeric,~ifelse(abs(.)>3,NA,1)))
+
+yld_df[3] <- yld_df[3]*dfouts[3]
+
+yld_df <- yld_df |> na.omit()
+
+write.csv(yld_df,"Phenotype_Files/YLD_BE.csv")
+
+# TWT
+
+yld_df <- pheno_comb |> select(FAMILY,LINE,TWT,LOC,YEAR) |> 
+  mutate(LINE_UNIQUE_ID = paste0(FAMILY,".",LINE)) |> na.omit()
+
+
+dfouts <- yld_df %>% mutate_if(is.numeric,scale) %>% mutate(across(is.numeric,~ifelse(abs(.)>3,NA,1)))
+
+yld_df[3] <- yld_df[3]*dfouts[3]
+
+yld_df <- yld_df |> na.omit()
+
+write.csv(yld_df,"Phenotype_Files/TWT.csv")
+
+# PHT
+
+yld_df <- pheno_comb |> select(FAMILY,LINE,PHT,LOC,YEAR) |> 
+  mutate(LINE_UNIQUE_ID = paste0(FAMILY,".",LINE)) |> na.omit()
+
+
+dfouts <- yld_df %>% mutate_if(is.numeric,scale) %>% mutate(across(is.numeric,~ifelse(abs(.)>3,NA,1)))
+
+yld_df[3] <- yld_df[3]*dfouts[3]
+
+yld_df <- yld_df |> na.omit()
+
+write.csv(yld_df,"Phenotype_Files/PHT.csv")
+
+
+# Remove outliers from BLUP values
+
+line_correction <- pheno_comb |> select(LINE_UNIQUE_ID,LINE,FAMILY) |> unique()
+
+BLUPdf <- read.csv("Phenotype_Files/YLD_BE_BLUP.csv")
+
+BLUPdf <- inner_join(BLUPdf,line_correction, by = "LINE_UNIQUE_ID") |> 
+  mutate(LINE_UNIQUE_ID = paste0(FAMILY,".",LINE)) |> na.omit()
+
+dfouts <- BLUPdf %>% mutate_if(is.numeric,scale) %>% mutate(across(is.numeric,~ifelse(abs(.)>3,NA,1)))
+
+BLUPdf[4] <- BLUPdf[4]*dfouts[4]
+
+BLUPdf <- BLUPdf |> na.omit()
+
+write.csv(BLUPdf,"Phenotype_Files/YLD_BE_BLUP_clean.csv")
+
+
+# TWT
+
+
+BLUPdf <- read.csv("Phenotype_Files/TWT_BLUP.csv")
+
+BLUPdf <- inner_join(BLUPdf,line_correction, by = "LINE_UNIQUE_ID") |> 
+  mutate(LINE_UNIQUE_ID = paste0(FAMILY,".",LINE)) |> na.omit()
+
+dfouts <- BLUPdf %>% mutate_if(is.numeric,scale) %>% mutate(across(is.numeric,~ifelse(abs(.)>3,NA,1)))
+
+BLUPdf[4] <- BLUPdf[4]*dfouts[4]
+
+BLUPdf <- BLUPdf |> na.omit()
+
+write.csv(BLUPdf,"Phenotype_Files/TWT_BLUP_clean.csv")
+
+
+# PHT
+
+
+BLUPdf <- read.csv("Phenotype_Files/PHT_BLUP.csv")
+
+BLUPdf <- inner_join(BLUPdf,line_correction, by = "LINE_UNIQUE_ID") |> 
+  mutate(LINE_UNIQUE_ID = paste0(FAMILY,".",LINE)) |> na.omit()
+
+dfouts <- BLUPdf %>% mutate_if(is.numeric,scale) %>% mutate(across(is.numeric,~ifelse(abs(.)>3,NA,1)))
+
+BLUPdf[4] <- BLUPdf[4]*dfouts[4]
+
+BLUPdf <- BLUPdf |> na.omit()
+
+write.csv(BLUPdf,"Phenotype_Files/PHT_BLUP_clean.csv")
+
+```
+
+
+### Group Weather Data by GS
+
+#### Calcualte In Season and Cumulative GDD for each location - year
+
+```{r}
+# Load weather data
+weatherdf <- read.csv(weather_dir)
+
+# Load Yield Data, which inlcudes planting and harvest dates
+phenodf <- pheno_comb
+
+# Create Planting Dates
+plantingdf <- phenodf %>% select(LOC,YEAR) %>% unique() %>% mutate(plantday = 1) %>% 
+  mutate(plantmonth = 5) %>% mutate(planting_date_numeric = plantmonth + 0.01*plantday) |>
+  mutate(LOC_YEAR = paste0(LOC,"_",YEAR))
+
+#Convert dates in weather data to numeric so they can be filtered
+weatherdf <- weatherdf %>% mutate(day = as.numeric(str_sub(date, 9,10))) %>% 
+  mutate(month = as.numeric(str_sub(date,6,7 ))) %>%
+  mutate(date_numeric = month + 0.01*day) %>% mutate(YEAR = str_sub(date,0,4)) |> 
+  mutate(LOC_YEAR = paste0(LOC, "_",YEAR))
+
+locyearlist <- weatherdf %>% pull(LOC_YEAR) %>% unique()
+
+#Calculate cumulative GDD for each locyr within the growing season
+
+allGDD <- data.frame(matrix(ncol = 4, nrow=0))
+colnames(allGDD) <- c("LOC_YEAR", "date_numeric", "inseasonGDD", "cumulativeinseasonGDD")
+
+l=1
+
+for(l in 1:length(locyearlist)){
+  
+  locyr <- locyearlist[l]
+  
+  locdate <- plantingdf %>% filter(LOC_YEAR == locyr) %>% pull(planting_date_numeric)
+  
+  if(length(locdate) != 1){
+    
+    next
+    
+  }
+  
+  locweatherdf <- weatherdf %>% filter(LOC_YEAR == locyr) %>% filter(date_numeric >= locdate) %>%
+    mutate(GDD_airmax = if_else(max_temp_c > 30, 30, max_temp_c)) %>% mutate(inseasonGDD = (GDD_airmax + min_temp_c)/2 - 10)
+  
+  locweatherdf <- locweatherdf %>% mutate(inseasonGDD = if_else(inseasonGDD < 0, 0, inseasonGDD)) %>% arrange(date_numeric)
+  
+  locweatherdf <- locweatherdf %>% mutate(cumulativeinseasonGDD = cumsum(inseasonGDD))
+  
+  GDDvalues <- locweatherdf %>% select(LOC_YEAR, date_numeric, inseasonGDD, cumulativeinseasonGDD )
+  
+  allGDD <- rbind(allGDD, GDDvalues)
+  
+}
+
+#Two loc - years have missing weather data
+
+newweatherdf <- left_join(weatherdf, allGDD, by = join_by("LOC_YEAR","date_numeric"))
+
+write.csv(newweatherdf, here("Weather_Data","Weather_inseasonGDD.csv"))
+
+```
+
+
+
+## Bin Weather by Growth Stage based on ERM
+```{r}
+# Remove rows with NA values, these represent rows that have weather data before or after harvest
+weatherdf <- read.csv(here("Weather_Data","Weather_inseasonGDD.csv")) |>  na.omit(weatherdf)
+
+weathercols <- colnames(weatherdf[,6:10])
+
+# Load Yield Data, which inlcudes planting and harvest dates
+yielddf <- phenodf %>% select(LOC,YEAR,FAMILY,LINE) %>% unique() %>% mutate(plantday = 1) %>% 
+  mutate(plantmonth = 5) %>% mutate(planting_date_numeric = plantmonth + 0.01*plantday) |>
+  mutate(LOC_YEAR = paste0(LOC,"_",YEAR)) |> mutate(LINE_UNIQUE_ID = paste0(FAMILY,".",LINE))
+
+# Planting data set as May 1 for all locations
+
+
+# Load ERM values
+
+ermdf <- read.csv(here("Weather_Data","ALL_ERM.csv"))
+ermdf <- ermdf |> mutate(LINE_UNIQUE_ID = paste0(FAMILY,".",LINE)) |> select(!c("LINE","FAMILY"))
+
+yielddf <- inner_join(yielddf,ermdf,by = "LINE_UNIQUE_ID")
+
+
+combinedbinnedweather <- data.frame(matrix(ncol = 27, nrow = 0))
+
+lablesvector <- c("EarlyVeg","LateVeg","Silk","BL")
+
+colnames(combinedbinnedweather) <- c(colnames(yielddf[,c(1:4,8:9,12)]),
+                                     paste0(rep(weathercols,each=4),"_",rep(lablesvector,times=5)))
+
+
+# Loop and create bins for each loc
+
+locyrlist <- yielddf |> pull(LOC_YEAR) |> unique()
+
+for(l in 1:length(locyrlist)){
+
+  locyr <- locyrlist[l]
+  ermlist <- yielddf |> filter(LOC_YEAR == locyr) |> pull(ERM) |> unique()
+  
+  for(e in 1:length(ermlist)){
+    
+    RM <- ermlist[e]
+  
+# Establish GDD cutoffs for 5 growth stages  
+
+GDDdf <- yielddf %>% select(LOC_YEAR) |> filter(LOC_YEAR == locyr) %>% 
+  mutate(ERM = RM) |> 
+  mutate(EarlyVeg2GDD = 4*RM+115) %>% 
+  mutate(LateVegGDD = 10*RM+115) %>% 
+  mutate(SilkGDD = 11.456*RM+100.57) %>% 
+  mutate(BLGDD = 24.158*RM-15.191) |> unique()
+
+
+lablesvector <- c("EarlyVeg","LateVeg","Silk","BL")
+
+
+  singleyield <- GDDdf
+
+  cutvector <- t(singleyield[3:6]) %>% as.vector()
+  cutvector <- c(0,cutvector)
+
+  
+  redweatherdf <- weatherdf %>% filter(LOC_YEAR == locyr) %>% 
+    mutate(cumulativeinseasonGDD = as.numeric(cumulativeinseasonGDD))
+ # Skip Entries where we do not have weather data for that loc year pair
+  if(nrow(redweatherdf) == 0){
+    
+    next
+  }
+  
+  redweatherdf <- redweatherdf %>% mutate(Maturity = cut(cumulativeinseasonGDD,
+                                                         breaks=cutvector,
+                                                         labels = lablesvector,
+                                                         include.lowest=T))
+  redweatherdf <- redweatherdf %>% group_by(Maturity) %>% summarize_at(all_of(weathercols),mean) %>% na.omit()
+  
+# Skip entries where not enough GDDs accumulated for all growth stages
+  if(nrow(redweatherdf) != 4){
+    
+    next
+    
+  }
+  
+  weathervars <- redweatherdf %>% pivot_wider(names_from = Maturity, values_from = -c(Maturity))
+  
+  
+  newentry <- cbind(singleyield,weathervars)
+  
+  combinedbinnedweather <- rbind(combinedbinnedweather,newentry)
+  }
+  
+  }
+
+
+entryandphenodf <- yielddf[,c(1:4,8:9,12)]
+
+fullweatherentrydf <- inner_join(entryandphenodf,combinedbinnedweather,by=join_by("LOC_YEAR","ERM"))
+
+loccount <- combinedbinnedweather |> pull(LOC_YEAR) |> unique()
+# 22 locations lost due to weather data problems (not enough accumulated GDDs) total of ~8000 observations lost
+
+write.csv(fullweatherentrydf,here("Weather_Data","4GS_Binned_Weather_Data_Mean.csv"))
+
+```
+
+
+
